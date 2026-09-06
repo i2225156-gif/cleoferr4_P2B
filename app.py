@@ -9,13 +9,14 @@ try:
     from flask_bcrypt import Bcrypt
     from functools import wraps
     from werkzeug.utils import secure_filename   # ← NUEVO
+    from dotenv import load_dotenv
 except Exception as e:
     print("\nERROR: faltan dependencias necesarias para ejecutar la aplicación.")
     print("Instale las dependencias dentro del entorno virtual y vuelva a intentarlo.")
     print("Comandos recomendados (desde el venv activado):")
     print("  pip install -r requirements.txt")
     print("Si no dispone de requirements.txt, instale al menos:")
-    print("  pip install flask flask-bcrypt pymysql sqlalchemy")
+    print("  pip install flask flask-bcrypt pymysql sqlalchemy python-dotenv")
     print("\nDetalle del error:", e, "\n")
     sys.exit(1)
 
@@ -23,11 +24,23 @@ from db import db
 from db2 import get_connection
 from sqlalchemy import text
 
+load_dotenv()
+
 app = Flask(__name__)
-app.secret_key = "clave_secreta_cleoferr"
+
+app.secret_key = os.environ.get("SECRET_KEY")
+if not app.secret_key:
+    raise RuntimeError(
+        "SECRET_KEY no definida. Créala en el archivo .env (p. ej. con: "
+        "python -c \"import secrets; print(secrets.token_hex(32))\")."
+    )
+
 os.environ['TZ'] = 'America/Lima'
-app.config["SQLALCHEMY_DATABASE_URI"] = "mysql+pymysql://prueba-cleofer:Cleoferr@mysql-prueba-cleofer.alwaysdata.net/prueba-cleofer_tienda_online"
-app.config["SQLALCHEMY_DATABASE_URI"] = ("mysql+pymysql://prueba-cleofer_anthuanett:Cleoferr@mysql-prueba-cleofer.alwaysdata.net/prueba-cleofer_tienda_online")
+
+_db_uri = os.environ.get("DATABASE_URI")
+if not _db_uri:
+    raise RuntimeError("DATABASE_URI no definida en el archivo .env.")
+app.config["SQLALCHEMY_DATABASE_URI"] = _db_uri
 
 app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
     "pool_pre_ping": True,
@@ -180,15 +193,13 @@ def login_cliente():
         conn.close()
 
         if cliente:
-            # Soporte bcrypt Y MD5 (según cómo esté guardada)
-            import hashlib
-            hash_md5 = hashlib.md5(contrasena.encode()).hexdigest()
-            stored   = cliente.get('contrasena') or cliente.get('password') or ''
-            ok = False
+            # Solo Bcrypt: las contraseñas de clientes deben estar hasheadas con bcrypt.
+            # Si el hash almacenado no es bcrypt válido, el acceso se rechaza.
+            stored = cliente.get('contrasena') or cliente.get('password') or ''
             try:
                 ok = bcrypt.check_password_hash(stored, contrasena)
-            except Exception:
-                ok = (stored == hash_md5)
+            except (ValueError, TypeError):
+                ok = False
 
             if ok:
                 nombre_cliente = (
@@ -1827,4 +1838,5 @@ def carrito_confirmar_v2():
 
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    # debug solo si FLASK_DEBUG=1 explícitamente en el entorno (nunca en producción)
+    app.run(debug=os.environ.get("FLASK_DEBUG", "0") == "1")
