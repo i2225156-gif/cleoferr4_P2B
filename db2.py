@@ -1,9 +1,11 @@
+import os
 import mysql.connector
+
 
 def get_connection():
     return mysql.connector.connect(
-        host="mysql-prueba-cleofer.alwaysdata.net",
-        user="prueba-cleofer",
-        password="Cleoferr",
-        database="prueba-cleofer_tienda_online"
+        host=os.environ["DB_HOST"],
+        user=os.environ["DB_USER"],
+        password=os.environ["DB_PASSWORD"],
+        database=os.environ["DB_NAME"],
     )
