@@ -1,0 +1,11 @@
+# Secretos — nunca versionar
+.env
+
+# Entorno virtual y cache de Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# Base de datos SQLite local (fallback desarrollo)
+*.db
