@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cleoferr – Iniciar Sesión</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        :root {
+            /* Paleta actualizada: azul acero como color principal */
+            --azul: #4682B4; /* steelblue (azul acero) */
+            --azul-oscuro: #2E5E85;
+            --azul-claro: #6BA8DF;
+            --gris-oscuro: #1A1A2E;
+            --blanco: #FFFFFF;
+            /* compatibilidad por si hay referencias antiguas */
+            --naranja: var(--azul);
+        }
+        body {
+            margin: 0; min-height: 100vh;
+            background: linear-gradient(135deg, var(--gris-oscuro) 0%, #0f3460 50%, #16213e 100%);
+            display: flex; align-items: center; justify-content: center;
+        }
+        .login-wrapper { width: 100%; max-width: 420px; padding: 20px; }
+        .login-card {
+            background: white; border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.4);
+            overflow: hidden;
+        }
+        .login-header {
+            background: linear-gradient(135deg, var(--gris-oscuro), var(--azul));
+            color: white; text-align: center; padding: 36px 20px;
+        }
+        .login-header .logo-wrap {
+            width: 70px; height: 70px; background: rgba(255,255,255,0.15);
+            border-radius: 50%; margin: 0 auto 14px; display: flex;
+            align-items: center; justify-content: center; font-size: 2rem;
+            border: 3px solid rgba(255,255,255,0.3);
+        }
+        .login-header h2 { margin: 0; font-weight: 800; font-size: 1.8rem; }
+        .login-header p { margin: 6px 0 0; opacity: 0.8; font-size: 0.9rem; }
+        .login-body { padding: 32px; }
+        .form-label { font-weight: 600; color: #333; font-size: 0.88rem; }
+        .form-control {
+            border-radius: 8px; padding: 11px 14px;
+            border: 2px solid #e0e0e0; font-size: 0.95rem;
+        }
+        .form-control:focus { border-color: var(--azul); box-shadow: 0 0 0 0.2rem rgba(70,130,180,0.15); }
+        .input-group-custom { position: relative; }
+        .input-group-custom .icon-left {
+            position: absolute; left: 14px; top: 50%; transform: translateY(-50%);
+            color: #aaa; z-index: 5; pointer-events: none;
+        }
+        .input-group-custom .form-control { padding-left: 40px; padding-right: 44px; }
+        .btn-toggle-pw {
+            position: absolute; right: 0; top: 0; height: 100%;
+            background: transparent; border: none; padding: 0 14px;
+            color: #aaa; cursor: pointer; z-index: 5;
+            transition: color 0.2s;
+        }
+        .btn-toggle-pw:hover { color: var(--azul-oscuro); }
+        .btn-login {
+            background: linear-gradient(135deg, var(--azul), var(--azul-claro));
+            border: none; color: white; font-weight: 700; font-size: 1rem;
+            padding: 13px; border-radius: 10px; width: 100%; transition: all 0.2s;
+        }
+        .btn-login:hover {
+            background: linear-gradient(135deg, var(--azul-oscuro), var(--azul));
+            transform: translateY(-1px); box-shadow: 0 6px 20px rgba(70,130,180,0.35);
+            color: white;
+        }
+        .link-cliente { text-align: center; margin-top: 16px; font-size: 0.88rem; }
+        .link-cliente a { color: var(--azul); font-weight: 600; text-decoration: none; }
+        .link-cliente a:hover { text-decoration: underline; }
+        .alert-error {
+            background: #fff3f3; border: 1px solid #ffcccc; color: #d32f2f;
+            border-radius: 8px; padding: 12px; margin-bottom: 18px; font-size: 0.9rem;
+        }
+        .login-trust {
+            margin-top:10px; font-size:0.86rem; color:#e9f3ff; opacity:0.95;
+        }
+        .login-quick {
+            display:flex; gap:8px; justify-content:center; margin-top:14px;
+        }
+        .login-quick a { color:white; background:rgba(255,255,255,0.06); padding:8px 12px; border-radius:8px; text-decoration:none; font-weight:600; }
+        .login-quick a:hover { background:rgba(255,255,255,0.12); }
+    </style>
+</head>
+<body>
+<div class="login-wrapper">
+    <div class="login-card">
+        <div class="login-header">
+            <div class="logo-wrap"><!-- logo --></div>
+            <h2>INICIO DE SESIÓN</h2>
+            <p class="login-trust">Acceso seguro y protegido. Esta sección es sólo para Administradores y Vendedores.</p>
+            <p style="margin-top:8px;font-size:0.9rem;color:rgba(255,255,255,0.9)">
+                ¿Eres cliente? <a href="/login_cliente" style="color:#fff; text-decoration:underline">Accede aquí al catálogo de clientes</a>
+            </p>
+            <div class="login-quick" aria-hidden="true">
+                <!-- Accesos rápidos ocultos en la pantalla pública de login -->
+            </div>
+        </div>
+        <div class="login-body">
+             {% if error %}
+                 <div class="alert-error"><i class="fa fa-exclamation-circle me-2"></i>{{ error }}</div>
+             {% endif %}
+             <form method="POST">
+                <div class="mb-3">
+                    <label class="form-label">Correo electrónico</label>
+                    <div class="input-group-custom">
+                        <i class="fa fa-envelope icon-left"></i>
+                        <input type="email" name="correo" class="form-control"
+                               placeholder="admin@cleoferr.com" required>
+                    </div>
+                </div>
+                <div class="mb-4">
+                    <label class="form-label">Contraseña</label>
+                    <div class="input-group-custom" style="position:relative">
+                        <i class="fa fa-lock icon-left"></i>
+                        <input type="password" name="clave" id="campoClave"
+                               class="form-control" placeholder="••••••••" required>
+                        <button type="button" class="btn-toggle-pw" onclick="togglePw('campoClave','iconoClave')">
+                            <i class="fa fa-eye" id="iconoClave"></i>
+                        </button>
+                    </div>
+                </div>
+                <button type="submit" class="btn-login">
+                    <i class="fa fa-sign-in-alt me-2"></i>Ingresar al Sistema
+                </button>
+            </form>
+            {% if url_whatsapp %}
+            <div class="text-center mt-3">
+                <a href="{{ url_whatsapp }}" target="_blank" rel="noopener noreferrer"
+                    class="btn btn-success btn-sm px-4 py-2"
+                    style="border-radius:25px; font-size:0.85rem;">
+                        <i class="fa-brands fa-whatsapp me-2"></i>¿Olvidaste tus credenciales? Escríbenos
+                </a>
+            </div>
+            {% endif %}
+            <div class="link-cliente">
+                ¿Eres cliente? <a href="/login_cliente">Acceder aquí</a>
+            </div>
+         </div>
+     </div>
+ </div>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+function togglePw(inputId, iconId) {
+    const input = document.getElementById(inputId);
+    const icon  = document.getElementById(iconId);
+    if (input.type === 'password') {
+        input.type = 'text';
+        icon.classList.replace('fa-eye', 'fa-eye-slash');
+    } else {
+        input.type = 'password';
+        icon.classList.replace('fa-eye-slash', 'fa-eye');
+    }
+}
+</script>
+</body>
+</html>
+    }
+}
+</script>
+</body>
+</html>

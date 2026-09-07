@@ -1,0 +1,420 @@
+{% extends 'base.html' %}
+{% block titulito %}{% if cliente %}Editar{% else %}Nuevo{% endif %} Cliente – Cleoferr{% endblock %}
+{% block contenido %}
+
+<style>
+    .campo-estado { font-size: 0.82rem; margin-top: 4px; min-height: 18px; }
+    .campo-estado.ok  { color: #28a745; }
+    .campo-estado.err { color: #dc3545; }
+    .chars-counter { font-size: 0.75rem; color: #999; float: right; }
+    .chars-counter.limite { color: #dc3545; font-weight: 700; }
+
+    .consulta-card {
+        background: linear-gradient(135deg, #f8f9fa, #eef2ff);
+        border: 2px dashed #c5cae9;
+        border-radius: 12px;
+        padding: 18px;
+        margin-bottom: 20px;
+    }
+    .consulta-card .titulo-bloque {
+        font-size: 0.82rem; font-weight: 700; color: #5c6bc0;
+        text-transform: uppercase; letter-spacing: 1px; margin-bottom: 14px;
+    }
+    .tabs-tipo { display: flex; gap: 8px; margin-bottom: 14px; }
+    .tab-btn {
+        padding: 7px 20px; border-radius: 20px; border: 2px solid #c5cae9;
+        background: white; font-weight: 600; font-size: 0.85rem;
+        cursor: pointer; transition: all 0.2s; color: #5c6bc0;
+    }
+    .tab-btn.activo { background: #5c6bc0; border-color: #5c6bc0; color: white; }
+
+    .btn-consultar {
+        background: linear-gradient(135deg, #5c6bc0, #3949ab);
+        border: none; color: white; font-weight: 700;
+        border-radius: 8px; padding: 10px 20px; transition: all 0.2s;
+        white-space: nowrap; cursor: pointer;
+    }
+    .btn-consultar:hover:not(:disabled) {
+        background: linear-gradient(135deg, #3949ab, #283593);
+        color: white; transform: translateY(-1px);
+    }
+    .btn-consultar:disabled { opacity: 0.55; cursor: not-allowed; }
+
+    .resultado-caja {
+        display: none; border-radius: 8px; padding: 12px 16px; margin-top: 12px;
+    }
+    .resultado-ok  { background: #f1f8e9; border: 1px solid #a5d6a7; }
+    .resultado-err { background: #fff8f8; border: 1px solid #ffcdd2; }
+
+    /* debug box */
+    .debug-box {
+        display:none; background:#1e1e1e; color:#80ff80; font-family:monospace;
+        font-size:0.78rem; border-radius:8px; padding:12px; margin-top:10px;
+        white-space:pre-wrap; word-break:break-all; max-height:180px; overflow-y:auto;
+    }
+
+    .spinner-mini {
+        display: none; width: 16px; height: 16px;
+        border: 2px solid rgba(255,255,255,0.4);
+        border-top-color: white; border-radius: 50%;
+        animation: spin 0.7s linear infinite;
+        vertical-align: middle; margin-right: 4px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+
+<div class="page-header">
+    <div>
+        <h2><i class="fa fa-{% if cliente %}edit{% else %}user-plus{% endif %} me-2"></i>
+            {% if cliente %}Editar Cliente{% else %}Nuevo Cliente{% endif %}
+        </h2>
+    </div>
+    <a href="/clientes" class="btn btn-outline-light"><i class="fa fa-arrow-left me-1"></i>Volver</a>
+</div>
+
+<div class="card card-custom" style="max-width:700px">
+    <div class="card-body p-4">
+        <form method="POST" id="formCliente" novalidate>
+
+            <!-- ── Bloque consulta DNI / RUC ── -->
+            <div class="consulta-card">
+                <div class="titulo-bloque"><i class="fa fa-search me-1"></i>Consulta DNI o RUC – APIs Perú</div>
+
+                <div class="tabs-tipo">
+                    <button type="button" class="tab-btn activo" id="tabDNI" onclick="setTipo('dni')">
+                        🪪 DNI (8 dígitos)
+                    </button>
+                    <button type="button" class="tab-btn" id="tabRUC" onclick="setTipo('ruc')">
+                        🏢 RUC (11 dígitos)
+                    </button>
+                </div>
+
+                <div class="d-flex gap-2 align-items-start">
+                    <div style="flex:1">
+                        <input type="text" id="campoDoc" class="form-control"
+                               placeholder="Ingresa 8 dígitos del DNI"
+                               maxlength="8" inputmode="numeric"
+                               oninput="this.value=this.value.replace(/\D/g,''); validarDoc()">
+                        <div class="campo-estado" id="estadoDoc"></div>
+                    </div>
+                    <button type="button" class="btn-consultar" id="btnConsultar"
+                            onclick="consultarDoc()" disabled>
+                        <span class="spinner-mini" id="spinner"></span>
+                        <i class="fa fa-search" id="iconoBtn"></i> Consultar
+                    </button>
+                </div>
+
+                <div class="resultado-caja" id="cajResultado">
+                    <div id="contenidoResultado"></div>
+                </div>
+
+
+            </div>
+
+            <!-- ── Nombre y Apellido ── -->
+            <div class="row g-3 mb-3">
+                <div class="col-md-6">
+                    <label class="form-label fw-semibold">
+                        Nombre(s) *
+                        <span class="chars-counter" id="ctrNombre">0/30</span>
+                    </label>
+                    <input type="text" id="campoNombre" class="form-control"
+                           placeholder="Ej: Juan Carlos" maxlength="30"
+                           value="{{ cliente.nombre.split(' ')[0] if cliente and cliente.nombre else '' }}"
+                           oninput="validarTexto(this,'ctrNombre','estadoNombre')" required>
+                    <div class="campo-estado" id="estadoNombre"></div>
+                </div>
+                <div class="col-md-6">
+                    <label class="form-label fw-semibold">
+                        Apellido(s) *
+                        <span class="chars-counter" id="ctrApellido">0/30</span>
+                    </label>
+                    <input type="text" id="campoApellido" class="form-control"
+                           placeholder="Ej: García López" maxlength="30"
+                           value="{{ ' '.join(cliente.nombre.split(' ')[1:]) if cliente and cliente.nombre else '' }}"
+                           oninput="validarTexto(this,'ctrApellido','estadoApellido')" required>
+                    <div class="campo-estado" id="estadoApellido"></div>
+                </div>
+            </div>
+
+            <input type="hidden" name="nombre" id="nombreCompleto">
+
+            <!-- ── Email ── -->
+            <div class="mb-3">
+                <label class="form-label fw-semibold">Email *</label>
+                <input type="email" name="email" class="form-control"
+                       value="{{ cliente.email if cliente else '' }}"
+                       required placeholder="correo@ejemplo.com">
+            </div>
+
+            <!-- ── Teléfono ── -->
+            <div class="mb-3">
+                <label class="form-label fw-semibold">Teléfono (Perú – 9 dígitos)</label>
+                <div class="input-group">
+                    <span class="input-group-text fw-semibold">🇵🇪 +51</span>
+                    <input type="tel" name="telefono" id="campoTelefono" class="form-control"
+                           value="{{ cliente.telefono if cliente else '' }}"
+                           placeholder="987654321" maxlength="9"
+                           oninput="this.value=this.value.replace(/\D/g,'').slice(0,9); validarTel()">
+                </div>
+                <div class="campo-estado" id="estadoTel"></div>
+            </div>
+
+            <!-- ── Dirección ── -->
+            <div class="mb-3">
+                <label class="form-label fw-semibold">Dirección</label>
+                <input type="text" name="direccion" id="campoDireccion" class="form-control"
+                       value="{{ cliente.direccion if cliente else '' }}"
+                       placeholder="Av. Ejemplo 123, Lima">
+            </div>
+
+            {% if not cliente %}
+            <div class="mb-4">
+                <label class="form-label fw-semibold">Contraseña inicial</label>
+                <div style="position:relative">
+                    <input type="password" name="contrasena" id="campoPwCliente"
+                           class="form-control pe-5" placeholder="Mínimo 6 caracteres">
+                    <button type="button" onclick="togglePw('campoPwCliente','iconPwCliente')"
+                            style="position:absolute;right:0;top:0;height:100%;background:transparent;border:none;padding:0 14px;color:#aaa;cursor:pointer">
+                        <i class="fa fa-eye" id="iconPwCliente"></i>
+                    </button>
+                </div>
+                <small class="text-muted">Si no se ingresa, se usará '123456' por defecto.</small>
+            </div>
+            {% endif %}
+
+            <div class="d-flex gap-2">
+                <button type="submit" class="btn btn-naranja px-4">
+                    <i class="fa fa-save me-1"></i>
+                    {% if cliente %}Actualizar{% else %}Registrar{% endif %}
+                </button>
+                <a href="/clientes" class="btn btn-outline-secondary px-4">Cancelar</a>
+            </div>
+        </form>
+    </div>
+</div>
+
+<script>
+const TOKEN   = 'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJlbWFpbCI6ImkyNTEzNzAyQGNvbnRpbmVudGFsLmVkdS5wZSJ9.o02LSzKdddnW-h9XO-sf5hFbquw5vroU6ZAoFhbl9mY';
+const BASE    = 'https://dniruc.apisperu.com/api/v1';
+const soloLetras = /^[a-zA-ZáéíóúÁÉÍÓÚñÑüÜ\s]+$/;
+let tipoActual = 'dni';
+
+/* ── Tabs ─────────────────────────────────────────────── */
+function setTipo(tipo) {
+    tipoActual = tipo;
+    document.getElementById('tabDNI').classList.toggle('activo', tipo === 'dni');
+    document.getElementById('tabRUC').classList.toggle('activo', tipo === 'ruc');
+    const campo = document.getElementById('campoDoc');
+    campo.value = '';
+    campo.maxLength = tipo === 'dni' ? 8 : 11;
+    campo.placeholder = tipo === 'dni' ? 'Ingresa 8 dígitos del DNI' : 'Ingresa 11 dígitos del RUC';
+    document.getElementById('estadoDoc').textContent = '';
+    document.getElementById('cajResultado').style.display = 'none';
+
+    document.getElementById('btnConsultar').disabled = true;
+}
+
+/* ── Validar longitud del campo doc ───────────────────── */
+function validarDoc() {
+    const v   = document.getElementById('campoDoc').value;
+    const est = document.getElementById('estadoDoc');
+    const btn = document.getElementById('btnConsultar');
+    const max = tipoActual === 'dni' ? 8 : 11;
+    // Recortar si excede
+    if (v.length > max) document.getElementById('campoDoc').value = v.slice(0, max);
+    const len = document.getElementById('campoDoc').value.length;
+    document.getElementById('cajResultado').style.display = 'none';
+
+    if (len === 0) {
+        est.textContent = ''; est.className = 'campo-estado'; btn.disabled = true;
+    } else if (len < max) {
+        est.textContent = `Faltan ${max - len} dígito(s)`; est.className = 'campo-estado err'; btn.disabled = true;
+    } else {
+        est.textContent = `✓ ${tipoActual.toUpperCase()} completo`; est.className = 'campo-estado ok'; btn.disabled = false;
+    }
+}
+
+/* ── Consulta API ─────────────────────────────────────── */
+async function consultarDoc() {
+    const num = document.getElementById('campoDoc').value.trim();
+    const max = tipoActual === 'dni' ? 8 : 11;
+    if (num.length !== max) return;
+
+    const btn     = document.getElementById('btnConsultar');
+    const spinner = document.getElementById('spinner');
+    const icono   = document.getElementById('iconoBtn');
+    const caja    = document.getElementById('cajResultado');
+    const cont    = document.getElementById('contenidoResultado');
+    btn.disabled = true;
+    spinner.style.display = 'inline-block';
+    icono.style.display   = 'none';
+    caja.style.display    = 'none';
+
+    try {
+        const url  = `${BASE}/${tipoActual}/${num}?token=${TOKEN}`;
+        const resp = await fetch(url, { headers: { 'Accept': 'application/json' } });
+        const raw  = await resp.text();           // texto crudo primero
+        let data;
+        try { data = JSON.parse(raw); } catch(e) { data = null; }
+
+
+
+        if (!data) {
+            mostrarError('La API devolvió una respuesta inválida. Intenta de nuevo.');
+        } else if (tipoActual === 'dni') {
+            // La API puede devolver: nombres/nombre, apellidoPaterno/apellido_paterno, etc.
+            // Buscamos todas las variantes posibles
+            const nombres   = data.nombres   || data.nombre    || data.name   || '';
+            const apPat     = data.apellidoPaterno  || data.apellido_paterno  || data.primerApellido || '';
+            const apMat     = data.apellidoMaterno  || data.apellido_materno  || data.segundoApellido || '';
+            const apellidos = (apPat + (apMat ? ' ' + apMat : '')).trim() || data.apellidos || data.apellido || '';
+
+            if (nombres || apellidos) {
+                setNombreApellido(toTitleCase(nombres), toTitleCase(apellidos));
+                caja.className = 'resultado-caja resultado-ok';
+                cont.innerHTML = `
+                    <div class="d-flex align-items-center gap-2">
+                        <span style="font-size:1.4rem">✅</span>
+                        <span class="fw-bold" style="color:#2e7d32;font-size:1rem">DNI ENCONTRADO</span>
+                    </div>`;
+            } else if (data.message || data.error || data.msg) {
+                mostrarError(data.message || data.error || data.msg);
+            } else {
+                mostrarError('DNI NO ENCONTRADO');
+            }
+
+        } else {
+            // RUC
+            const razon    = data.razonSocial || data.razon_social || data.nombre || '';
+            const direccion = data.direccion  || data.domicilioFiscal || '';
+
+            if (razon) {
+                const partes = razon.trim().split(/\s+/);
+                const nombre   = partes.slice(0, 1).join(' ');
+                const apellido = partes.slice(1).join(' ') || razon;
+                setNombreApellido(toTitleCase(nombre), toTitleCase(apellido));
+                if (direccion) document.getElementById('campoDireccion').value = toTitleCase(direccion);
+                caja.className = 'resultado-caja resultado-ok';
+                cont.innerHTML = `
+                    <div class="d-flex align-items-center gap-2">
+                        <span style="font-size:1.4rem">✅</span>
+                        <span class="fw-bold" style="color:#2e7d32;font-size:1rem">RUC ENCONTRADO</span>
+                    </div>`;
+            } else if (data.message || data.error || data.msg) {
+                mostrarError(data.message || data.error || data.msg);
+            } else {
+                mostrarError('RUC NO ENCONTRADO');
+            }
+        }
+    } catch (err) {
+        mostrarError('Error de conexión: ' + err.message + '. Ingresa los datos manualmente.');
+    }
+
+    btn.disabled = false;
+    spinner.style.display = 'none';
+    icono.style.display   = 'inline';
+    caja.style.display    = 'block';
+}
+
+function mostrarError(msg) {
+    const caja = document.getElementById('cajResultado');
+    const cont = document.getElementById('contenidoResultado');
+    caja.className = 'resultado-caja resultado-err';
+    cont.innerHTML = `<div class="d-flex align-items-center gap-2">
+        <span style="font-size:1.3rem">⚠️</span>
+        <span style="color:#c62828;font-size:0.9rem">${msg}</span>
+    </div>`;
+    caja.style.display = 'block';
+}
+
+function setNombreApellido(nombre, apellido) {
+    const n = document.getElementById('campoNombre');
+    const a = document.getElementById('campoApellido');
+    n.value = nombre.slice(0, 30);
+    a.value = apellido.slice(0, 30);
+    validarTexto(n, 'ctrNombre',   'estadoNombre');
+    validarTexto(a, 'ctrApellido', 'estadoApellido');
+}
+
+function toTitleCase(str) {
+    if (!str) return '';
+    return str.toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
+}
+
+/* ── Validaciones ─────────────────────────────────────── */
+function togglePw(inputId, iconId) {
+    const input = document.getElementById(inputId);
+    const icon  = document.getElementById(iconId);
+    if (input.type === 'password') {
+        input.type = 'text'; icon.classList.replace('fa-eye','fa-eye-slash');
+    } else {
+        input.type = 'password'; icon.classList.replace('fa-eye-slash','fa-eye');
+    }
+}
+
+function validarTexto(input, ctrId, estadoId) {
+    const v      = input.value;
+    const ctr    = document.getElementById(ctrId);
+    const est    = document.getElementById(estadoId);
+    const limpio = v.replace(/[^a-zA-ZáéíóúÁÉÍÓÚñÑüÜ\s]/g, '');
+    if (limpio !== v) input.value = limpio;
+    ctr.textContent = `${limpio.length}/30`;
+    ctr.classList.toggle('limite', limpio.length >= 28);
+    if (limpio.trim().length === 0) {
+        est.textContent = ''; est.className = 'campo-estado';
+        input.classList.remove('is-valid','is-invalid');
+    } else if (limpio.trim().length < 2) {
+        est.textContent = '✗ Mínimo 2 letras'; est.className = 'campo-estado err';
+        input.classList.add('is-invalid'); input.classList.remove('is-valid');
+    } else {
+        est.textContent = '✓ Correcto'; est.className = 'campo-estado ok';
+        input.classList.add('is-valid'); input.classList.remove('is-invalid');
+    }
+}
+
+function validarTel() {
+    const v   = document.getElementById('campoTelefono').value;
+    const est = document.getElementById('estadoTel');
+    if (v.length === 0) { est.textContent=''; est.className='campo-estado'; return; }
+    est.textContent = v.length < 9 ? `Faltan ${9-v.length} dígito(s)` : '✓ Número válido';
+    est.className   = v.length < 9 ? 'campo-estado err' : 'campo-estado ok';
+}
+
+window.addEventListener('DOMContentLoaded', () => {
+    const n = document.getElementById('campoNombre');
+    const a = document.getElementById('campoApellido');
+    if (n.value) validarTexto(n,'ctrNombre','estadoNombre');
+    if (a.value) validarTexto(a,'ctrApellido','estadoApellido');
+});
+
+/* ── Envío ────────────────────────────────────────────── */
+document.getElementById('formCliente').addEventListener('submit', function(e) {
+    const nombre   = document.getElementById('campoNombre').value.trim();
+    const apellido = document.getElementById('campoApellido').value.trim();
+    const tel      = document.getElementById('campoTelefono').value;
+    let ok = true;
+
+    if (!nombre || nombre.length < 2 || !soloLetras.test(nombre)) {
+        document.getElementById('estadoNombre').textContent = '✗ Campo requerido (solo letras)';
+        document.getElementById('estadoNombre').className   = 'campo-estado err';
+        document.getElementById('campoNombre').classList.add('is-invalid');
+        ok = false;
+    }
+    if (!apellido || apellido.length < 2 || !soloLetras.test(apellido)) {
+        document.getElementById('estadoApellido').textContent = '✗ Campo requerido (solo letras)';
+        document.getElementById('estadoApellido').className   = 'campo-estado err';
+        document.getElementById('campoApellido').classList.add('is-invalid');
+        ok = false;
+    }
+    if (tel.length > 0 && tel.length !== 9) {
+        document.getElementById('estadoTel').textContent = '✗ El teléfono debe tener exactamente 9 dígitos';
+        document.getElementById('estadoTel').className   = 'campo-estado err';
+        document.getElementById('campoTelefono').classList.add('is-invalid');
+        ok = false;
+    }
+    if (!ok) { e.preventDefault(); return; }
+    document.getElementById('nombreCompleto').value = nombre + ' ' + apellido;
+});
+</script>
+{% endblock %}

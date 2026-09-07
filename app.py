@@ -21,7 +21,7 @@ except Exception as e:
     sys.exit(1)
 
 from db import db
-from db2 import get_connection
+from db_supabase import get_connection_auth, get_connection_tienda
 from sqlalchemy import text
 
 load_dotenv()
@@ -37,10 +37,11 @@ if not app.secret_key:
 
 os.environ['TZ'] = 'America/Lima'
 
-_db_uri = os.environ.get("DATABASE_URI")
-if not _db_uri:
-    raise RuntimeError("DATABASE_URI no definida en el archivo .env.")
-app.config["SQLALCHEMY_DATABASE_URI"] = _db_uri
+# El ORM (modelo Producto) usa la BD Tienda.
+_tienda_uri = os.environ.get("DATABASE_URI_TIENDA")
+if not _tienda_uri:
+    raise RuntimeError("DATABASE_URI_TIENDA no definida en el archivo .env.")
+app.config["SQLALCHEMY_DATABASE_URI"] = _tienda_uri
 
 app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
     "pool_pre_ping": True,
@@ -53,27 +54,6 @@ UPLOAD_FOLDER      = os.path.join(app.root_path, 'static', 'img')
 ALLOWED_EXTENSIONS = {'jpg', 'jpeg', 'png', 'webp', 'gif'}
 app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024   # 5 MB máximo
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-
-# Intentar usar PyMySQL; si no está instalado, hacer fallback a SQLite para desarrollo local.
-try:
-    import pymysql  # noqa: F401
-except ImportError:
-    # Si la configuración actual indica MySQL pero falta pymysql, sustituimos por SQLite temporalmente.
-    uri = app.config.get('SQLALCHEMY_DATABASE_URI', '') if 'app' in globals() else ''
-    if uri and 'mysql' in uri:
-        # Advertir y cambiar a sqlite local
-        try:
-            app.logger.warning("PyMySQL no encontrado; cambiando temporalmente a sqlite:///cleoferr.db para desarrollo local.")
-        except Exception:
-            pass
-        app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///cleoferr.db'
-    elif not uri:
-        # Si no hay URI configurada, establecer sqlite por defecto
-        try:
-            app.logger.info("No existe SQLALCHEMY_DATABASE_URI; usando sqlite:///cleoferr.db por defecto.")
-        except Exception:
-            pass
-        app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///cleoferr.db'
 
 def allowed_file(filename):
     return '.' in filename and \
@@ -103,7 +83,7 @@ class Producto(db.Model):
     stock        = db.Column(db.Integer, default=0)
     id_categoria = db.Column(db.Integer)
     id_marca     = db.Column(db.Integer)
-    estado       = db.Column(db.String(10), default='activo')
+    activo       = db.Column(db.Boolean, default=True)
     imagen       = db.Column(db.String(255))
 
     def __repr__(self):
@@ -149,7 +129,7 @@ def login():
     if request.method == 'POST':
         correo = request.form['correo']
         clave  = request.form['clave']
-        conn   = get_connection()
+        conn   = get_connection_auth()
         cursor = conn.cursor(dictionary=True)
         cursor.execute("""
             SELECT u.id_usuario, u.nombres, u.email, u.contrasena, r.nombre AS rol
@@ -185,7 +165,7 @@ def login_cliente():
     if request.method == 'POST':
         correo     = request.form['correo']
         contrasena = request.form['contrasena']
-        conn       = get_connection()
+        conn       = get_connection_auth()
         cursor     = conn.cursor(dictionary=True)
         # Busca el cliente por email — la columna nombre puede variar
         cursor.execute("SELECT * FROM cliente WHERE email = %s", (correo,))
@@ -239,7 +219,7 @@ def productos():
 
     categoria = request.args.get('categoria')
     marca     = request.args.get('marca')
-    conn      = get_connection()
+    conn      = get_connection_tienda()
     cursor    = conn.cursor(dictionary=True)
 
     query = """
@@ -276,12 +256,12 @@ def productos():
     except Exception:
         pass
     try:
-        cursor.execute("SELECT COUNT(*) AS cnt FROM alertas WHERE resuelta = 0")
+        cursor.execute("SELECT COUNT(*) AS cnt FROM alerta WHERE resuelta = FALSE")
         alertas_count = cursor.fetchone()['cnt']
     except Exception:
         pass
     try:
-        cursor.execute("SELECT COUNT(*) AS cnt FROM inventario_movimiento WHERE DATE(fecha) = CURDATE()")
+        cursor.execute("SELECT COUNT(*) AS cnt FROM inventario_movimiento WHERE DATE(fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima') = CURRENT_DATE")
         movimientos_count = cursor.fetchone()['cnt']
     except Exception:
         pass
@@ -306,7 +286,7 @@ def productos():
 @escritura_required
 def producto_detalle(id):
     producto = db.get_or_404(Producto, id)
-    conn   = get_connection()
+    conn   = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
     movimientos = []
     categoria_nombre = '–'
@@ -344,28 +324,52 @@ def exportar_pedidos_excel():
     try:
         import io, csv
         from flask import make_response
-        conn   = get_connection()
+        # Consulta 1 (Tienda): ventas con total, sin joins cross-BD
+        conn   = get_connection_tienda()
         cursor = conn.cursor(dictionary=True)
         cursor.execute("""
-            SELECT
-                v.id_venta AS 'N° Pedido',
-                CONVERT_TZ(v.fecha, '+00:00', '-05:00') AS 'Fecha (Perú)',
-                CONCAT(COALESCE(c.nombre,''), ' ', COALESCE(c.apellido,'')) AS 'Cliente',
-                c.telefono AS 'Teléfono',
-                v.estado AS 'Estado',
-                v.tipo_venta AS 'Tipo',
-                u.nombres AS 'Responsable',
-                COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS 'Total (S/)'
+            SELECT v.id_venta,
+                   v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima' AS fecha,
+                   v.id_cliente,
+                   ev.nombre AS estado,
+                   tv.nombre AS tipo_venta,
+                   v.id_usuario_vendedor,
+                   COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS total
             FROM venta v
-            LEFT JOIN cliente c ON v.id_cliente = c.id_cliente
-            LEFT JOIN usuario u ON v.id_usuario_vendedor = u.id_usuario
+            LEFT JOIN estado_venta ev ON v.id_estado_venta = ev.id_estado_venta
+            LEFT JOIN tipo_venta tv ON v.id_tipo_venta = tv.id_tipo_venta
             LEFT JOIN detalle_venta d ON v.id_venta = d.id_venta
-            GROUP BY v.id_venta, v.fecha, c.nombre, c.apellido, c.telefono,
-                     v.estado, v.tipo_venta, u.nombres
+            GROUP BY v.id_venta, v.fecha, v.id_cliente, ev.nombre,
+                     tv.nombre, v.id_usuario_vendedor
             ORDER BY v.fecha DESC
         """)
-        pedidos = cursor.fetchall()
+        ventas = cursor.fetchall()
         conn.close()
+
+        # Consulta 2 (Auth): diccionarios de clientes y usuarios
+        conn_a   = get_connection_auth()
+        cursor_a = conn_a.cursor(dictionary=True)
+        cursor_a.execute("SELECT id_cliente, nombre, apellido, telefono FROM cliente")
+        clientes_map = {c['id_cliente']: c for c in cursor_a.fetchall()}
+        cursor_a.execute("SELECT id_usuario, nombres FROM usuario")
+        usuarios_map = {u['id_usuario']: u for u in cursor_a.fetchall()}
+        conn_a.close()
+
+        # Unión en memoria (equivalente al antiguo JOIN cross-BD)
+        pedidos = []
+        for v in ventas:
+            cli = clientes_map.get(v['id_cliente']) or {}
+            usr = usuarios_map.get(v['id_usuario_vendedor']) or {}
+            pedidos.append({
+                'N° Pedido':    v['id_venta'],
+                'Fecha (Perú)': v['fecha'],
+                'Cliente':      (f"{cli.get('nombre') or ''} {cli.get('apellido') or ''}").strip(),
+                'Teléfono':     cli.get('telefono'),
+                'Estado':       v['estado'],
+                'Tipo':         v['tipo_venta'],
+                'Responsable':  usr.get('nombres'),
+                'Total (S/)':   v['total'],
+            })
 
         # Intentar usar openpyxl si está disponible, si no usar CSV
         try:
@@ -476,13 +480,13 @@ def _excel_response(rows, filename, sheet_name='Datos'):
 @login_required
 @escritura_required
 def exportar_productos_excel():
-    conn = get_connection(); cursor = conn.cursor(dictionary=True)
+    conn = get_connection_tienda(); cursor = conn.cursor(dictionary=True)
     try:
         cursor.execute("""
-            SELECT p.id_producto AS 'ID', p.nombre AS 'Producto',
-                   c.nombre AS 'Categoría', m.nombre AS 'Marca',
-                   p.precio AS 'Precio (S/)', p.stock AS 'Stock',
-                   p.estado AS 'Estado'
+            SELECT p.id_producto AS "ID", p.nombre AS "Producto",
+                   c.nombre AS "Categoría", m.nombre AS "Marca",
+                   p.precio AS "Precio (S/)", p.stock AS "Stock",
+                   CASE WHEN p.activo THEN 'activo' ELSE 'inactivo' END AS "Estado"
             FROM producto p
             LEFT JOIN categoria c ON p.id_categoria = c.id_categoria
             LEFT JOIN marca m ON p.id_marca = m.id_marca
@@ -498,13 +502,13 @@ def exportar_productos_excel():
 @login_required
 @escritura_required
 def exportar_clientes_excel():
-    conn = get_connection(); cursor = conn.cursor(dictionary=True)
+    conn = get_connection_auth(); cursor = conn.cursor(dictionary=True)
     try:
         cursor.execute("""
-            SELECT id_cliente AS 'ID',
-                   CONCAT(COALESCE(nombre,''), ' ', COALESCE(apellido,'')) AS 'Nombre completo',
-                   email AS 'Correo', telefono AS 'Teléfono',
-                   estado AS 'Estado'
+            SELECT id_cliente AS "ID",
+                   CONCAT(COALESCE(nombre,''), ' ', COALESCE(apellido,'')) AS "Nombre completo",
+                   email AS "Correo", telefono AS "Teléfono",
+                   CASE WHEN activo THEN 'activo' ELSE 'inactivo' END AS "Estado"
             FROM cliente ORDER BY id_cliente
         """)
         rows = cursor.fetchall()
@@ -517,12 +521,13 @@ def exportar_clientes_excel():
 @login_required
 @escritura_required
 def exportar_proveedores_excel():
-    conn = get_connection(); cursor = conn.cursor(dictionary=True)
+    conn = get_connection_tienda(); cursor = conn.cursor(dictionary=True)
     try:
         cursor.execute("""
-            SELECT id_proveedor AS 'ID', nombre AS 'Proveedor',
-                   contacto AS 'Contacto', telefono AS 'Teléfono',
-                   correo AS 'Correo', estado AS 'Estado'
+            SELECT id_proveedor AS "ID", nombre AS "Proveedor",
+                   contacto AS "Contacto", telefono AS "Teléfono",
+                   email AS "Correo",
+                   CASE WHEN activo THEN 'activo' ELSE 'inactivo' END AS "Estado"
             FROM proveedor ORDER BY id_proveedor
         """)
         rows = cursor.fetchall()
@@ -535,27 +540,43 @@ def exportar_proveedores_excel():
 @login_required
 @escritura_required
 def exportar_inventario_excel():
-    conn = get_connection(); cursor = conn.cursor(dictionary=True)
+    conn = get_connection_tienda(); cursor = conn.cursor(dictionary=True)
     try:
+        # Consulta 1 (Tienda): movimientos + producto
         cursor.execute("""
-            SELECT im.id AS 'ID',
-                   CONVERT_TZ(im.fecha, '+00:00', '-05:00') AS 'Fecha (Perú)',
-                   p.nombre AS 'Producto',
-                   im.tipo AS 'Tipo',
-                   im.cantidad AS 'Cantidad',
-                   COALESCE(u.nombres, '') AS 'Responsable',
-                   COALESCE(im.motivo, '') AS 'Motivo'
+            SELECT im.id_movimiento AS id,
+                   im.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima' AS fecha,
+                   p.nombre AS producto,
+                   im.tipo,
+                   im.cantidad,
+                   im.id_usuario,
+                    COALESCE(im.observacion, '') AS motivo
             FROM inventario_movimiento im
             LEFT JOIN producto p ON im.id_producto = p.id_producto
-            LEFT JOIN usuario u ON im.id_usuario = u.id_usuario
             ORDER BY im.fecha DESC
         """)
-        rows = cursor.fetchall()
+        movimientos = cursor.fetchall()
+        # Consulta 2 (Auth): nombres de usuarios
+        conn_a = get_connection_auth()
+        cursor_a = conn_a.cursor(dictionary=True)
+        cursor_a.execute("SELECT id_usuario, nombres FROM usuario")
+        usuarios_map = {u['id_usuario']: u['nombres'] for u in cursor_a.fetchall()}
+        conn_a.close()
+        # Unión en memoria
+        rows = [{
+            'ID': m['id'],
+            'Fecha (Perú)': m['fecha'],
+            'Producto': m['producto'],
+            'Tipo': m['tipo'],
+            'Cantidad': m['cantidad'],
+            'Responsable': usuarios_map.get(m['id_usuario'], ''),
+            'Motivo': m['motivo'],
+        } for m in movimientos]
     except Exception:
         try:
             cursor.execute("""
-                SELECT p.nombre AS 'Producto', p.stock AS 'Stock actual'
-                FROM producto p WHERE p.estado = 'activo' ORDER BY p.nombre
+                SELECT p.nombre AS "Producto", p.stock AS "Stock actual"
+                 FROM producto p WHERE p.activo = TRUE ORDER BY p.nombre
             """)
             rows = cursor.fetchall()
         except Exception:
@@ -569,23 +590,42 @@ def exportar_inventario_excel():
 @login_required
 @escritura_required
 def exportar_ventas_dia_excel():
-    conn = get_connection(); cursor = conn.cursor(dictionary=True)
+    conn = get_connection_tienda(); cursor = conn.cursor(dictionary=True)
     try:
+        # Consulta 1 (Tienda): ventas del día (hora Perú) sin join a cliente
         cursor.execute("""
-            SELECT v.id_venta AS 'N° Pedido',
-                   CONVERT_TZ(v.fecha, '+00:00', '-05:00') AS 'Fecha/Hora (Perú)',
-                   CONCAT(COALESCE(c.nombre,''), ' ', COALESCE(c.apellido,'')) AS 'Cliente',
-                   v.estado AS 'Estado',
-                   v.tipo_venta AS 'Tipo',
-                   COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS 'Total (S/)'
+            SELECT v.id_venta,
+                   v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima' AS fecha,
+                   v.id_cliente,
+                   ev.nombre AS estado,
+                   tv.nombre AS tipo_venta,
+                   COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS total
             FROM venta v
-            LEFT JOIN cliente c ON v.id_cliente = c.id_cliente
+            LEFT JOIN estado_venta ev ON v.id_estado_venta = ev.id_estado_venta
+            LEFT JOIN tipo_venta tv ON v.id_tipo_venta = tv.id_tipo_venta
             LEFT JOIN detalle_venta d ON v.id_venta = d.id_venta
-            WHERE DATE(CONVERT_TZ(v.fecha, '+00:00', '-05:00')) = CURDATE()
-            GROUP BY v.id_venta, v.fecha, c.nombre, c.apellido, v.estado, v.tipo_venta
+            WHERE DATE(v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima') = CURRENT_DATE
+            GROUP BY v.id_venta, v.fecha, v.id_cliente, ev.nombre, tv.nombre
             ORDER BY v.fecha DESC
         """)
-        rows = cursor.fetchall()
+        ventas = cursor.fetchall()
+        # Consulta 2 (Auth): clientes + unión en memoria
+        conn_a = get_connection_auth()
+        cursor_a = conn_a.cursor(dictionary=True)
+        cursor_a.execute("SELECT id_cliente, nombre, apellido FROM cliente")
+        clientes_map = {c['id_cliente']: c for c in cursor_a.fetchall()}
+        conn_a.close()
+        rows = []
+        for v in ventas:
+            cli = clientes_map.get(v['id_cliente']) or {}
+            rows.append({
+                'N° Pedido': v['id_venta'],
+                'Fecha/Hora (Perú)': v['fecha'],
+                'Cliente': (f"{cli.get('nombre') or ''} {cli.get('apellido') or ''}").strip(),
+                'Estado': v['estado'],
+                'Tipo': v['tipo_venta'],
+                'Total (S/)': v['total'],
+            })
     finally:
         conn.close()
     return _excel_response(rows, 'ventas_hoy_cleoferr.xlsx', 'Ventas de hoy')
@@ -599,10 +639,11 @@ def exportar_reportes_excel():
 
 
 
+@app.route('/productos/nuevo')
 @login_required
 @escritura_required
 def nuevo_producto():
-    conn   = get_connection()
+    conn   = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
     cursor.execute("SELECT * FROM categoria")
     categorias = cursor.fetchall()
@@ -624,7 +665,7 @@ def guardar_producto():
         stock        = request.form['stock'],
         id_categoria = request.form['id_categoria'],
         id_marca     = request.form['id_marca'],
-        estado       = request.form.get('estado', 'activo'),
+        activo       = request.form.get('estado', 'activo') != 'inactivo',
         imagen       = nombre_imagen
     )
     db.session.add(nuevo)
@@ -638,7 +679,7 @@ def guardar_producto():
 @escritura_required
 def editar_producto(id):
     producto = db.get_or_404(Producto, id)
-    conn   = get_connection()
+    conn   = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
     cursor.execute("SELECT * FROM categoria")
     categorias = cursor.fetchall()
@@ -664,7 +705,7 @@ def actualizar_producto(id):
     producto.stock       = request.form['stock']
     producto.id_categoria = request.form['id_categoria']
     producto.id_marca    = request.form['id_marca']
-    producto.estado      = request.form.get('estado', 'activo')
+    producto.activo      = request.form.get('estado', 'activo') != 'inactivo'
     if nombre_imagen:                                   # ← CAMBIÓ
         producto.imagen = nombre_imagen
     db.session.commit()
@@ -686,14 +727,14 @@ def eliminar_producto(id):
 
 @app.route('/catalogo')
 def catalogo_cliente():
-    conn   = get_connection()
+    conn   = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
     cursor.execute("""
         SELECT p.*, c.nombre AS categoria, m.nombre AS marca
         FROM producto p
         LEFT JOIN categoria c ON p.id_categoria = c.id_categoria
         LEFT JOIN marca m ON p.id_marca = m.id_marca
-        WHERE p.estado = 'activo'
+        WHERE p.activo = TRUE
         ORDER BY p.id_producto
     """)
     lista = cursor.fetchall()
@@ -706,10 +747,14 @@ def catalogo_cliente():
 @login_required
 @escritura_required
 def clientes():
-    conn   = get_connection()
+    conn   = get_connection_auth()
     cursor = conn.cursor(dictionary=True)
-    cursor.execute("SHOW COLUMNS FROM cliente")
-    columnas = [c['Field'] for c in cursor.fetchall()]
+    cursor.execute("""
+        SELECT column_name FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'cliente'
+        ORDER BY ordinal_position
+    """)
+    columnas = [c['column_name'] for c in cursor.fetchall()]
     cursor.execute("SELECT * FROM cliente ORDER BY id_cliente DESC")
     lista = cursor.fetchall()
     conn.close()
@@ -728,7 +773,7 @@ def nuevo_cliente():
         contrasena = request.form.get('contrasena', '123456')
         hash_pw   = bcrypt.generate_password_hash(contrasena).decode('utf-8')
 
-        conn   = get_connection()
+        conn   = get_connection_auth()
         cursor = conn.cursor()
         try:
             cursor.execute(
@@ -750,7 +795,7 @@ def nuevo_cliente():
 @login_required
 @escritura_required
 def editar_cliente(id):
-    conn   = get_connection()
+    conn   = get_connection_auth()
     cursor = conn.cursor(dictionary=True)
     if request.method == 'POST':
         nombre    = request.form['nombre']
@@ -784,7 +829,7 @@ def editar_cliente(id):
 @login_required
 @admin_required
 def eliminar_cliente(id):
-    conn   = get_connection()
+    conn   = get_connection_auth()
     cursor = conn.cursor()
     try:
         cursor.execute("DELETE FROM cliente WHERE id_cliente = %s", (id,))
@@ -803,36 +848,43 @@ def eliminar_cliente(id):
 @login_required
 @escritura_required
 def inventario():
-    conn   = get_connection()
+    # Consulta 1 (Tienda): movimientos + producto + proveedor
+    conn   = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
     cursor.execute("""
-        SELECT i.*, p.nombre AS producto_nombre, pr.nombre AS proveedor_nombre,
-               u.nombres AS usuario_nombre
+        SELECT i.*, p.nombre AS producto_nombre, pr.nombre AS proveedor_nombre
         FROM inventario_movimiento i
         LEFT JOIN producto p ON i.id_producto = p.id_producto
         LEFT JOIN proveedor pr ON i.id_proveedor = pr.id_proveedor
-        LEFT JOIN usuario u ON i.id_usuario = u.id_usuario
         ORDER BY i.fecha DESC
         LIMIT 200
     """)
     movimientos = cursor.fetchall()
 
-    cursor.execute("SELECT * FROM producto WHERE estado='activo' ORDER BY nombre")
+    cursor.execute("SELECT * FROM producto WHERE activo = TRUE ORDER BY nombre")
     productos = cursor.fetchall()
     cursor.execute("SELECT * FROM proveedor ORDER BY nombre")
     proveedores = cursor.fetchall()
+    conn.close()
 
-    # Obtener lista de vendedores (usuarios con rol 'vendedor')
-    cursor.execute("""
+    # Consulta 2 (Auth): usuarios y vendedores
+    conn_a   = get_connection_auth()
+    cursor_a = conn_a.cursor(dictionary=True)
+    cursor_a.execute("SELECT id_usuario, nombres FROM usuario")
+    usuarios_map = {u['id_usuario']: u['nombres'] for u in cursor_a.fetchall()}
+    cursor_a.execute("""
         SELECT u.id_usuario, u.nombres
         FROM usuario u
         INNER JOIN rol r ON u.id_rol = r.id_rol
         WHERE r.nombre = 'vendedor'
         ORDER BY u.nombres
     """)
-    vendedores = cursor.fetchall()
+    vendedores = cursor_a.fetchall()
+    conn_a.close()
 
-    conn.close()
+    # Unión en memoria: añadir nombre de usuario a cada movimiento
+    for m in movimientos:
+        m['usuario_nombre'] = usuarios_map.get(m.get('id_usuario'))
     return render_template('inventario.html',
                            movimientos=movimientos,
                            productos=productos,
@@ -854,7 +906,7 @@ def registrar_movimiento():
     observacion  = request.form.get('observacion', '')
     id_usuario   = session['usuario_id']
 
-    conn   = get_connection()
+    conn   = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
 
     # Obtener stock actual
@@ -874,10 +926,14 @@ def registrar_movimiento():
     nuevo_stock = stock_actual + cantidad if tipo == 'entrada' else stock_actual - cantidad
 
     # Si es salida y se seleccionó un vendedor, obtener su nombre y añadir a observación
+    # (la tabla usuario vive en la BD Auth, por eso se consulta por separado)
     if tipo == 'salida' and id_vendedor:
         try:
-            cursor.execute("SELECT nombres FROM usuario WHERE id_usuario=%s", (id_vendedor,))
-            row = cursor.fetchone()
+            conn_a   = get_connection_auth()
+            cursor_a = conn_a.cursor(dictionary=True)
+            cursor_a.execute("SELECT nombres FROM usuario WHERE id_usuario=%s", (id_vendedor,))
+            row = cursor_a.fetchone()
+            conn_a.close()
             nombre_vendedor = row['nombres'] if row else None
             if nombre_vendedor:
                 observacion = f"Vendedor: {nombre_vendedor}" + (f" - {observacion}" if observacion else "")
@@ -911,7 +967,7 @@ def registrar_movimiento():
 @login_required
 @escritura_required
 def proveedores():
-    conn   = get_connection()
+    conn   = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
     cursor.execute("SELECT * FROM proveedor ORDER BY nombre")
     lista = cursor.fetchall()
@@ -929,7 +985,7 @@ def nuevo_proveedor():
         telefono  = request.form.get('telefono', '')
         email     = request.form.get('email', '')
         direccion = request.form.get('direccion', '')
-        conn      = get_connection()
+        conn      = get_connection_tienda()
         cursor    = conn.cursor()
         try:
             cursor.execute(
@@ -951,7 +1007,7 @@ def nuevo_proveedor():
 @login_required
 @escritura_required
 def editar_proveedor(id):
-    conn   = get_connection()
+    conn   = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
     if request.method == 'POST':
         nombre    = request.form['nombre']
@@ -982,7 +1038,7 @@ def editar_proveedor(id):
 @login_required
 @admin_required
 def eliminar_proveedor(id):
-    conn   = get_connection()
+    conn   = get_connection_tienda()
     cursor = conn.cursor()
     try:
         cursor.execute("DELETE FROM proveedor WHERE id_proveedor=%s", (id,))
@@ -1007,7 +1063,7 @@ def eliminar_proveedor_post(proveedor_id):
 
     try:
         # Borrado parametrizado para evitar inyecciones
-        db.session.execute(text("DELETE FROM proveedores WHERE id = :id"), {'id': proveedor_id})
+        db.session.execute(text("DELETE FROM proveedor WHERE id_proveedor = :id"), {'id': proveedor_id})
         db.session.commit()
         flash('Proveedor eliminado correctamente.', 'success')
     except Exception as e:
@@ -1022,30 +1078,49 @@ def eliminar_proveedor_post(proveedor_id):
 @login_required
 @escritura_required
 def pedidos():
-    conn = get_connection()
+    conn = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
-    PASOS = ['pendiente', 'confirmado', 'preparando', 'listo', 'entregado']
+    PASOS = ['pendiente', 'procesando', 'enviado', 'entregado']
     try:
+        # Consulta 1 (Tienda): ventas + total, sin joins cross-BD
         cursor.execute("""
             SELECT
                 v.id_venta      AS id_pedido,
-                CONVERT_TZ(v.fecha, '+00:00', '-05:00') AS fecha,
-                v.tipo_venta,
-                v.estado,
-                CONCAT(c.nombre, ' ', COALESCE(c.apellido,'')) AS cliente_nombre,
-                c.telefono      AS cliente_telefono,
-                u.nombres       AS responsable,
+                v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima' AS fecha,
+                tv.nombre    AS tipo_venta,
+                ev.nombre    AS estado,
+                v.id_cliente,
+                v.id_usuario_vendedor,
                 COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS total
             FROM venta v
-            LEFT JOIN cliente  c ON v.id_cliente          = c.id_cliente
-            LEFT JOIN usuario  u ON v.id_usuario_vendedor  = u.id_usuario
-            LEFT JOIN detalle_venta d ON v.id_venta        = d.id_venta
-            GROUP BY v.id_venta, v.fecha, v.tipo_venta, v.estado,
-                     c.nombre, c.apellido, c.telefono, u.nombres
+            LEFT JOIN tipo_venta tv ON v.id_tipo_venta = tv.id_tipo_venta
+            LEFT JOIN estado_venta ev ON v.id_estado_venta = ev.id_estado_venta
+            LEFT JOIN detalle_venta d ON v.id_venta = d.id_venta
+            GROUP BY v.id_venta, v.fecha, tv.nombre, ev.nombre,
+                     v.id_cliente, v.id_usuario_vendedor
             ORDER BY v.fecha DESC
             LIMIT 200
         """)
         pedidos_raw = cursor.fetchall()
+        conn.close()
+
+        # Consulta 2 (Auth): clientes y usuarios
+        conn_a   = get_connection_auth()
+        cursor_a = conn_a.cursor(dictionary=True)
+        cursor_a.execute("SELECT id_cliente, nombre, apellido, telefono FROM cliente")
+        clientes_map = {c['id_cliente']: c for c in cursor_a.fetchall()}
+        cursor_a.execute("SELECT id_usuario, nombres FROM usuario")
+        usuarios_map = {u['id_usuario']: u for u in cursor_a.fetchall()}
+        conn_a.close()
+
+        # Unión en memoria (equivalente al JOIN cross-BD)
+        for ped in pedidos_raw:
+            cli = clientes_map.get(ped['id_cliente']) or {}
+            usr = usuarios_map.get(ped['id_usuario_vendedor']) or {}
+            ped['cliente_nombre']    = (f"{cli.get('nombre') or ''} {cli.get('apellido') or ''}").strip() or None
+            ped['cliente_telefono']  = cli.get('telefono')
+            ped['responsable']       = usr.get('nombres')
+
         pedidos = []
         for ped in pedidos_raw:
             estado = ped.get('estado') or 'pendiente'
@@ -1079,25 +1154,29 @@ def pedidos():
 @login_required
 @escritura_required
 def venta_nueva_form():
-    conn = get_connection()
-    cursor = conn.cursor(dictionary=True)
-    clientes = []
+    clientes  = []
     productos = []
     try:
-        cursor.execute("""
+        # Consulta 1 (Auth): clientes activos
+        conn_a   = get_connection_auth()
+        cursor_a = conn_a.cursor(dictionary=True)
+        cursor_a.execute("""
             SELECT id_cliente, CONCAT(nombre, ' ', COALESCE(apellido,'')) AS nombre, telefono
-            FROM cliente WHERE estado = 'activo' ORDER BY nombre
+            FROM cliente WHERE activo = TRUE ORDER BY nombre
         """)
-        clientes = cursor.fetchall()
+        clientes = cursor_a.fetchall()
+        conn_a.close()
+        # Consulta 2 (Tienda): productos con stock
+        conn   = get_connection_tienda()
+        cursor = conn.cursor(dictionary=True)
         cursor.execute("""
             SELECT id_producto, nombre, precio, stock
-            FROM producto WHERE estado = 'activo' AND stock > 0 ORDER BY nombre
+            FROM producto WHERE activo = TRUE AND stock > 0 ORDER BY nombre
         """)
         productos = cursor.fetchall()
+        conn.close()
     except Exception as e:
         print(f"ERROR en /ventas/nueva GET: {e}")
-    finally:
-        conn.close()
     return render_template('venta_form.html', clientes=clientes, productos=productos)
 
 
@@ -1114,15 +1193,17 @@ def venta_nueva_guardar():
         flash('Debes agregar al menos un producto.', 'danger')
         return redirect(url_for('venta_nueva_form'))
 
-    conn   = get_connection()
+    conn   = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
     try:
         # Crear la venta
         cursor.execute("""
-            INSERT INTO venta (tipo_venta, id_cliente, id_usuario_vendedor, estado)
-            VALUES (%s, %s, %s, 'pendiente')
+            INSERT INTO venta (id_tipo_venta, id_cliente, id_usuario_vendedor, id_estado_venta)
+            VALUES ((SELECT id_tipo_venta FROM tipo_venta WHERE nombre = %s), %s, %s,
+                    (SELECT id_estado_venta FROM estado_venta WHERE nombre = 'pendiente'))
+            RETURNING id_venta
         """, (tipo_venta, id_cliente, session.get('usuario_id')))
-        id_venta = cursor.lastrowid
+        id_venta = cursor.fetchone()['id_venta']
 
         # Insertar cada ítem y descontar stock
         for id_prod, cant in zip(ids_producto, cantidades):
@@ -1155,29 +1236,46 @@ def venta_nueva_guardar():
 @login_required
 @escritura_required
 def pedido_detalle(id):
-    conn   = get_connection()
+    conn   = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
     pedido     = None
     items      = []
     comprobante = None
     try:
+        # Consulta 1 (Tienda): venta + total
         cursor.execute("""
             SELECT
                 v.*,
-                CONCAT(COALESCE(c.nombre,''), ' ', COALESCE(c.apellido,'')) AS cliente_nombre,
-                c.telefono AS cliente_telefono,
-                u.nombres  AS responsable,
+                ev.nombre AS estado,
+                tv.nombre AS tipo_venta,
                 COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS total
             FROM venta v
-            LEFT JOIN cliente c ON v.id_cliente = c.id_cliente
-            LEFT JOIN usuario u ON v.id_usuario_vendedor = u.id_usuario
+            LEFT JOIN estado_venta ev ON v.id_estado_venta = ev.id_estado_venta
+            LEFT JOIN tipo_venta tv ON v.id_tipo_venta = tv.id_tipo_venta
             LEFT JOIN detalle_venta d ON v.id_venta = d.id_venta
             WHERE v.id_venta = %s
-            GROUP BY v.id_venta
+            GROUP BY v.id_venta, ev.nombre, tv.nombre
         """, (id,))
         pedido = cursor.fetchone()
         if pedido:
             pedido['id_venta'] = pedido.get('id_venta', id)
+            # Consulta 2 (Auth): cliente y vendedor responsable
+            conn_a   = get_connection_auth()
+            cursor_a = conn_a.cursor(dictionary=True)
+            if pedido.get('id_cliente'):
+                cursor_a.execute(
+                    "SELECT nombre, apellido, telefono FROM cliente WHERE id_cliente = %s",
+                    (pedido['id_cliente'],))
+                cli = cursor_a.fetchone() or {}
+                pedido['cliente_nombre']   = (f"{cli.get('nombre') or ''} {cli.get('apellido') or ''}").strip()
+                pedido['cliente_telefono'] = cli.get('telefono')
+            if pedido.get('id_usuario_vendedor'):
+                cursor_a.execute(
+                    "SELECT nombres FROM usuario WHERE id_usuario = %s",
+                    (pedido['id_usuario_vendedor'],))
+                usr = cursor_a.fetchone()
+                pedido['responsable'] = usr['nombres'] if usr else None
+            conn_a.close()
         cursor.execute("""
             SELECT d.*, p.nombre AS producto_nombre
             FROM detalle_venta d
@@ -1195,7 +1293,7 @@ def pedido_detalle(id):
     finally:
         conn.close()
     # Calcular idx_actual en Python para evitar el error .index() en Jinja2
-    PASOS = ['pendiente', 'confirmado', 'preparando', 'listo', 'entregado']
+    PASOS = ['pendiente', 'procesando', 'enviado', 'entregado']
     estado_actual = (pedido.get('estado') or 'pendiente') if pedido else 'pendiente'
     idx_actual = PASOS.index(estado_actual) if estado_actual in PASOS else 0
     return render_template('pedido_detalle.html', pedido=pedido, items=items,
@@ -1206,7 +1304,7 @@ def pedido_detalle(id):
 @login_required
 @escritura_required
 def reportes():
-    conn = get_connection()
+    conn = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
     resumen = {}
     reportes_data = None
@@ -1214,7 +1312,12 @@ def reportes():
     try:
         # Ventas hoy (si existe tabla pedido con campo total y fecha)
         try:
-            cursor.execute("SELECT IFNULL(SUM(total),0) AS ventas_hoy FROM pedido WHERE DATE(fecha) = CURDATE()")
+            cursor.execute("""
+                SELECT COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS ventas_hoy
+                FROM venta v
+                JOIN detalle_venta d ON v.id_venta = d.id_venta
+                WHERE DATE(v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima') = CURRENT_DATE
+            """)
             row = cursor.fetchone()
             resumen['ventas_hoy'] = float(row['ventas_hoy'] or 0)
         except Exception:
@@ -1222,7 +1325,7 @@ def reportes():
 
         # Stock total (suma de stock de productos)
         try:
-            cursor.execute("SELECT IFNULL(SUM(stock),0) AS stock_total FROM producto")
+            cursor.execute("SELECT COALESCE(SUM(stock),0) AS stock_total FROM producto")
             row = cursor.fetchone()
             resumen['stock_total'] = int(row['stock_total'] or 0)
         except Exception:
@@ -1230,7 +1333,7 @@ def reportes():
 
         # Alertas pendientes
         try:
-            cursor.execute("SELECT COUNT(*) AS cnt FROM alertas WHERE resuelta = 0")
+            cursor.execute("SELECT COUNT(*) AS cnt FROM alerta WHERE resuelta = FALSE")
             row = cursor.fetchone()
             resumen['alertas'] = int(row['cnt'] or 0)
         except Exception:
@@ -1240,8 +1343,8 @@ def reportes():
         try:
             cursor.execute("""
                 SELECT tipo,
-                       IFNULL(SUM(cantidad),0) AS total_cantidad,
-                       IFNULL(SUM(precio_unitario * cantidad),0) AS total_valor
+                       COALESCE(SUM(cantidad),0) AS total_cantidad,
+                       COALESCE(SUM(precio_unitario * cantidad),0) AS total_valor
                 FROM inventario_movimiento
                 WHERE fecha >= DATE_SUB(NOW(), INTERVAL 30 DAY)
                 GROUP BY tipo
@@ -1283,7 +1386,7 @@ def reportes():
 @login_required
 @escritura_required
 def alertas():
-    conn = get_connection()
+    conn = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
     alertas = []
     bajo_stock = []
@@ -1294,25 +1397,25 @@ def alertas():
         """)
         bajo_stock = cursor.fetchall()
         # Sincronizar: crear alerta en BD para cada producto con stock < 15 si no existe ya una sin resolver
+        # (esquema real: tabla alerta con id_producto + id_tipo_alerta; 1 = stock_bajo)
         for p in bajo_stock:
             cursor.execute("""
-                SELECT id FROM alertas
-                WHERE tipo = 'bajo_stock' AND relacionado = %s AND resuelta = 0
+                SELECT id_alerta FROM alerta
+                WHERE id_tipo_alerta = 1 AND id_producto = %s AND resuelta = FALSE
                 LIMIT 1
-            """, (str(p['id_producto']),))
+            """, (p['id_producto'],))
             if not cursor.fetchone():
                 prioridad = 'alta' if p['stock'] < 5 else 'media'
                 cursor.execute("""
-                    INSERT INTO alertas (tipo, descripcion, relacionado, prioridad, fecha)
-                    VALUES (%s, %s, %s, %s, NOW())
+                    INSERT INTO alerta (id_tipo_alerta, id_producto, descripcion, prioridad, fecha)
+                    VALUES (1, %s, %s, %s, NOW())
                 """, (
-                    'bajo_stock',
+                    p['id_producto'],
                     f"Stock insuficiente: {p['nombre']} tiene {p['stock']} unidades (mínimo sugerido: 15)",
-                    str(p['id_producto']),
                     prioridad
                 ))
         conn.commit()
-        cursor.execute("SELECT * FROM alertas ORDER BY fecha DESC LIMIT 200")
+        cursor.execute("SELECT * FROM alerta ORDER BY fecha DESC LIMIT 200")
         alertas = cursor.fetchall()
     except Exception:
         alertas = []
@@ -1325,10 +1428,10 @@ def alertas():
 @login_required
 @escritura_required
 def alertas_resolver(id):
-    conn = get_connection()
+    conn = get_connection_tienda()
     cursor = conn.cursor()
     try:
-        cursor.execute("UPDATE alertas SET resuelta = 1, fecha_resuelta = NOW() WHERE id = %s", (id,))
+        cursor.execute("UPDATE alerta SET resuelta = TRUE WHERE id_alerta = %s", (id,))
         conn.commit()
         flash("Alerta marcada como resuelta.", "success")
     except Exception as e:
@@ -1359,7 +1462,7 @@ def carrito_agregar():
     if key in carrito:
         carrito[key]['cantidad'] += cantidad
     else:
-        conn   = get_connection()
+        conn   = get_connection_tienda()
         cursor = conn.cursor(dictionary=True)
         cursor.execute("SELECT nombre, precio FROM producto WHERE id_producto=%s", (id_producto,))
         prod = cursor.fetchone()
@@ -1373,61 +1476,6 @@ def carrito_agregar():
             }
     session['carrito'] = carrito
     return {'ok': True, 'items': len(carrito)}
-
-
-@app.route('/carrito/confirmar', methods=['POST'])
-@login_required
-def carrito_confirmar():
-    data  = request.get_json() or {}
-    items = data.get('items', []) or []
-    # Si no hay items, mantener comportamiento simple
-    if not items:
-        session['carrito'] = {}
-        session['ultimo_pedido'] = []
-        return {'ok': True}
-
-    # Si usuario no es cliente, solo guardar en sesión (compatibilidad)
-    if session.get('rol') != 'cliente':
-        session['carrito'] = {}
-        session['ultimo_pedido'] = items
-        return {'ok': True}
-
-    # Usuario es cliente: registrar venta en DB
-    conn   = get_connection()
-    cursor = conn.cursor()
-    try:
-        # Insertar en tabla venta
-        cursor.execute("""
-            INSERT INTO venta (tipo_venta, id_cliente, estado)
-            VALUES ('online', %s, 'pendiente')
-        """, (session['usuario_id'],))
-        id_venta = cursor.lastrowid
-
-        # Insertar detalle y descontar stock
-        for it in items:
-            id_producto = int(it.get('id_producto') or it.get('id') or 0)
-            cantidad    = int(it.get('cantidad', 1))
-            precio_unit = float(it.get('precio', 0) or 0)
-            cursor.execute("""
-                INSERT INTO detalle_venta (id_venta, id_producto, cantidad, precio_unitario)
-                VALUES (%s, %s, %s, %s)
-            """, (id_venta, id_producto, cantidad, precio_unit))
-            cursor.execute("""
-                UPDATE producto SET stock = GREATEST(stock - %s, 0)
-                WHERE id_producto = %s
-            """, (cantidad, id_producto))
-
-        conn.commit()
-        session['carrito'] = {}
-        session['ultimo_pedido'] = items
-        flash(f"¡Pedido #{id_venta} registrado correctamente! Pronto nos comunicaremos contigo.", "success")
-        return {'ok': True, 'id_pedido': id_venta}
-    except Exception as e:
-        conn.rollback()
-        app.logger.exception("Error creando venta desde carrito: %s", e)
-        return {'ok': False, 'error': str(e)}
-    finally:
-        conn.close()
 
 
 @app.route('/procesar_pago', methods=['POST'])
@@ -1455,11 +1503,9 @@ def procesar_pago():
         flash("No hay items en el carrito para procesar.", "warning")
         return redirect(url_for('catalogo_cliente'))
 
-    # Reusar la lógica de carrito_confirmar para crear pedido (llamar internamente)
-    # Construir payload y llamar a la función interna
-    from flask import jsonify
-    resp = carrito_confirmar()  # devuelve dict o respuesta
-    # carrito_confirmar ya hizo commit y flash
+    # Reusar la lógica de carrito_confirmar_v2 para crear pedido (llamar internamente)
+    resp = carrito_confirmar_v2()  # devuelve dict o respuesta
+    # carrito_confirmar_v2 ya hizo commit y flash
     # redirigir al cliente a catálogo o a detalle del pedido si id devuelto
     if isinstance(resp, dict) and resp.get('ok') and resp.get('id_pedido'):
         return redirect(url_for('catalogo_cliente'))
@@ -1485,7 +1531,7 @@ def cambiar_clave():
         if nueva != confirmar:
             return render_template('cambiar_clave.html', error='Las contraseñas no coinciden')
         nueva_hash = bcrypt.generate_password_hash(nueva).decode('utf-8')
-        conn   = get_connection()
+        conn   = get_connection_auth()
         cursor = conn.cursor()
         cursor.execute("UPDATE usuario SET contrasena = %s WHERE id_usuario = %s",
                        (nueva_hash, session['usuario_id']))
@@ -1522,7 +1568,7 @@ def registro_cliente():
                                error='Las contraseñas no coinciden.',
                                registro_activo=True)
 
-    conn   = get_connection()
+    conn   = get_connection_auth()
     cursor = conn.cursor(dictionary=True)
     try:
         cursor.execute("SELECT id_cliente FROM cliente WHERE email = %s", (correo,))
@@ -1647,12 +1693,12 @@ def verificar_registro():
                                error='Código incorrecto. Intenta de nuevo.',
                                verificar_activo=True,
                                correo_verificar=pending['correo'])
-    conn   = get_connection()
+    conn   = get_connection_auth()
     cursor = conn.cursor()
     try:
         cursor.execute(
-            """INSERT INTO cliente (nombre, apellido, email, telefono, contrasena, estado)
-               VALUES (%s, %s, %s, %s, %s, 'activo')""",
+            """INSERT INTO cliente (nombre, apellido, email, telefono, contrasena, activo)
+               VALUES (%s, %s, %s, %s, %s, TRUE)""",
             (pending['nombre'], pending['apellido'], pending['correo'],
              pending['telefono'], pending['hash_pw'])
         )
@@ -1675,20 +1721,21 @@ def mis_pedidos():
         return redirect(url_for('login_cliente'))
     if session.get('rol') != 'cliente':
         return redirect(url_for('pedidos'))
-    conn   = get_connection()
+    conn   = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
     pedidos_lista = []
-    PASOS = ['pendiente', 'confirmado', 'preparando', 'listo', 'entregado']
+    PASOS = ['pendiente', 'procesando', 'enviado', 'entregado']
     try:
         cursor.execute("""
             SELECT v.id_venta,
-                   CONVERT_TZ(v.fecha, '+00:00', '-05:00') AS fecha,
-                   v.estado,
+                   v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima' AS fecha,
+                   ev.nombre AS estado,
                    COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS total
             FROM venta v
+            LEFT JOIN estado_venta ev ON v.id_estado_venta = ev.id_estado_venta
             LEFT JOIN detalle_venta d ON v.id_venta = d.id_venta
             WHERE v.id_cliente = %s
-            GROUP BY v.id_venta, v.fecha, v.estado
+            GROUP BY v.id_venta, v.fecha, ev.nombre
             ORDER BY v.fecha DESC
         """, (session['usuario_id'],))
         pedidos_lista = cursor.fetchall()
@@ -1722,10 +1769,14 @@ def pedido_aceptado():
     id_pedido = request.args.get('id', '')
     estado    = 'pendiente'
     if id_pedido:
-        conn   = get_connection()
+        conn   = get_connection_tienda()
         cursor = conn.cursor(dictionary=True)
         try:
-            cursor.execute("SELECT estado FROM venta WHERE id_venta = %s", (id_pedido,))
+            cursor.execute("""
+            SELECT ev.nombre AS estado FROM venta v
+            LEFT JOIN estado_venta ev ON v.id_estado_venta = ev.id_estado_venta
+            WHERE v.id_venta = %s
+        """, (id_pedido,))
             row = cursor.fetchone()
             if row:
                 estado = row.get('estado', 'pendiente')
@@ -1741,15 +1792,19 @@ def pedido_aceptado():
 @escritura_required
 def pedido_cambiar_estado(id):
     """Vendedor/Admin cambia el estado (fase) de un pedido."""
-    estados_validos = ('pendiente', 'confirmado', 'preparando', 'listo', 'entregado', 'cancelado')
+    estados_validos = ('pendiente', 'procesando', 'enviado', 'entregado', 'cancelado')
     nuevo_estado = request.form.get('estado', 'pendiente')
     if nuevo_estado not in estados_validos:
         flash('Estado no válido.', 'danger')
         return redirect(url_for('pedido_detalle', id=id))
-    conn   = get_connection()
+    conn   = get_connection_tienda()
     cursor = conn.cursor()
     try:
-        cursor.execute("UPDATE venta SET estado = %s WHERE id_venta = %s", (nuevo_estado, id))
+        cursor.execute("""
+            UPDATE venta
+            SET id_estado_venta = (SELECT id_estado_venta FROM estado_venta WHERE nombre = %s)
+            WHERE id_venta = %s
+        """, (nuevo_estado, id))
         conn.commit()
         flash(f'Estado actualizado a "{nuevo_estado}".', 'success')
     except Exception as e:
@@ -1786,21 +1841,27 @@ def carrito_confirmar_v2():
     metodo_db    = 'yape_plin' if metodo_pago == 'yape' else (
                    'tarjeta'   if metodo_pago == 'tarjeta' else 'efectivo')
 
-    conn   = get_connection()
+    conn   = get_connection_tienda()
     cursor = conn.cursor()
     try:
+        # El esquema real de venta usa FKs: id_tipo_venta e id_estado_venta.
+        # El método de pago se registra en la tabla pago (id_tipo_pago).
+        cursor.execute("""
+            INSERT INTO venta (id_tipo_venta, id_cliente, id_estado_venta, num_operacion)
+            VALUES ((SELECT id_tipo_venta FROM tipo_venta WHERE nombre = 'online'),
+                    %s,
+                    (SELECT id_estado_venta FROM estado_venta WHERE nombre = 'pendiente'),
+                    %s)
+            RETURNING id_venta
+        """, (session['usuario_id'], num_operacion))
+        id_venta = cursor.fetchone()[0]
         try:
             cursor.execute("""
-                INSERT INTO venta (tipo_venta, id_cliente, estado, metodo_pago, num_operacion)
-                VALUES ('online', %s, 'pendiente', %s, %s)
-            """, (session['usuario_id'], metodo_db, num_operacion))
+                INSERT INTO pago (id_venta, id_tipo_pago, estado)
+                VALUES (%s, (SELECT id_tipo_pago FROM tipo_pago WHERE nombre = %s), 'pendiente')
+            """, (id_venta, metodo_db))
         except Exception:
-            # Si columnas metodo_pago/num_operacion no existen aún
-            cursor.execute("""
-                INSERT INTO venta (tipo_venta, id_cliente, estado)
-                VALUES ('online', %s, 'pendiente')
-            """, (session['usuario_id'],))
-        id_venta = cursor.lastrowid
+            pass  # tabla/columna de pago opcional; no bloquea el pedido
 
         for it in items:
             id_producto = int(it.get('id_producto') or it.get('id') or 0)
@@ -1818,9 +1879,9 @@ def carrito_confirmar_v2():
         num_comp = 'B' + str(id_venta).zfill(6) + '-' + ''.join(random.choices(string.digits, k=4))
         try:
             cursor.execute("""
-                INSERT INTO comprobante (id_venta, tipo, tipo_boleta, ruc_cliente, numero)
-                VALUES (%s, %s, %s, %s, %s)
-            """, (id_venta, tipo_comp_db, tipo_boleta, ruc, num_comp))
+                INSERT INTO comprobante (id_venta, id_tipo_comprobante, numero, ruc)
+                VALUES (%s, (SELECT id_tipo_comprobante FROM tipo_comprobante WHERE nombre = %s), %s, %s)
+            """, (id_venta, tipo_comp_db, num_comp, ruc))
         except Exception:
             pass  # tabla comprobante puede no existir; no es crítico
 

@@ -1,0 +1,80 @@
+{% extends 'base.html' %}
+{% block titulito %}Clientes – Cleoferr{% endblock %}
+{% block contenido %}
+
+<div class="page-header">
+    <div>
+        <h2><i class="fa fa-users me-2"></i>REGISTRO DE USUARIO</h2>
+        <p>Lista de usuarios del sistema (administradores, vendedores). Búsquedas rápidas y filtros por tipo/DNI/estado. Total: {{ clientes|length }}</p>
+    </div>
+    <div class="d-flex gap-2">
+        <a href="/clientes/nuevo" class="btn btn-naranja">
+            <i class="fa fa-user-plus me-1"></i> Nuevo Usuario
+        </a>
+        <a href="/reportes/clientes/exportar" class="btn btn-outline-secondary">
+            <i class="fa fa-file-excel me-1"></i> Exportar Excel
+        </a>
+    </div>
+</div>
+
+<div class="card card-custom">
+    <div class="card-header">
+        <i class="fa fa-list me-2"></i>Listado de usuarios
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-custom table-hover mb-0">
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th>Nombre</th>
+                        <th>Email</th>
+                        <th>Teléfono</th>
+                        <th>Dirección</th>
+                        <th>Acciones</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for c in clientes %}
+                    <tr>
+                        <td>{{ c.id_cliente }}</td>
+                        <td>
+                            <div class="d-flex align-items-center gap-2">
+                                <div class="rounded-circle d-flex align-items-center justify-content-center"
+                                     style="width:36px;height:36px;background:linear-gradient(135deg,var(--naranja),#ff7a35);color:white;font-weight:700;font-size:0.9rem">
+                                    {{ (c.nombre or 'C')[0].upper() }}
+                                </div>
+                                <span class="fw-semibold">{{ c.nombre or '–' }}</span>
+                            </div>
+                        </td>
+                        <td>{{ c.email or '–' }}</td>
+                        <td>{{ c.telefono or '–' }}</td>
+                        <td><small class="text-muted">{{ c.direccion or '–' }}</small></td>
+                        <td>
+                            <div class="d-flex gap-1">
+                                <a href="/clientes/editar/{{ c.id_cliente }}" class="btn btn-sm btn-outline-warning" title="Editar">
+                                    <i class="fa fa-edit"></i>
+                                </a>
+                                {% if session.rol == 'administrador' %}
+                                <a href="/clientes/eliminar/{{ c.id_cliente }}" class="btn btn-sm btn-outline-danger"
+                                   onclick="return confirm('¿Eliminar este cliente?')">
+                                    <i class="fa fa-trash"></i>
+                                </a>
+                                {% endif %}
+                            </div>
+                        </td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="6" class="text-center py-5 text-muted">
+                            <i class="fa fa-users fa-2x mb-2 d-block"></i>
+                            No hay clientes registrados
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock %}

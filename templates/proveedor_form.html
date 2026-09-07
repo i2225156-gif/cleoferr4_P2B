@@ -1,0 +1,93 @@
+{% extends 'base.html' %}
+{% block titulito %}{% if proveedor %}Editar{% else %}Nuevo{% endif %} Proveedor – Cleoferr{% endblock %}
+{% block contenido %}
+
+<div class="page-header">
+    <div>
+        <h2><i class="fa fa-truck me-2"></i>
+            {% if proveedor %}Editar Proveedor{% else %}Nuevo Proveedor{% endif %}
+        </h2>
+    </div>
+    <a href="/proveedores" class="btn btn-outline-light"><i class="fa fa-arrow-left me-1"></i>Volver</a>
+</div>
+
+<div class="card card-custom" style="max-width:600px">
+    <div class="card-body p-4">
+        <form method="POST" id="formProveedor">
+            <div class="mb-3">
+                <label class="form-label fw-semibold">Nombre empresa *</label>
+                <input type="text" name="nombre" class="form-control"
+                       value="{{ proveedor.nombre if proveedor else '' }}" required>
+            </div>
+            <div class="mb-3">
+                <label class="form-label fw-semibold">Persona de contacto</label>
+                <input type="text" name="contacto" class="form-control"
+                       value="{{ proveedor.contacto if proveedor else '' }}" placeholder="Nombre del representante">
+            </div>
+            <div class="row g-3">
+                <div class="col-md-6">
+                    <label class="form-label fw-semibold">Teléfono (Perú – 9 dígitos)</label>
+                    <div class="input-group">
+                        <span class="input-group-text fw-semibold">🇵🇪 +51</span>
+                        <input type="tel" name="telefono" id="campoTelProv" class="form-control"
+                               value="{{ proveedor.telefono if proveedor else '' }}"
+                               placeholder="987654321"
+                               maxlength="9"
+                               pattern="[0-9]{9}"
+                               oninput="this.value=this.value.replace(/\D/g,'').slice(0,9)">
+                    </div>
+                    <div class="form-text" id="telProvFeedback"></div>
+                </div>
+                <div class="col-md-6">
+                    <label class="form-label fw-semibold">Email</label>
+                    <input type="email" name="email" class="form-control"
+                           value="{{ proveedor.email if proveedor else '' }}" placeholder="contacto@empresa.com">
+                </div>
+            </div>
+            <div class="mb-4 mt-3">
+                <label class="form-label fw-semibold">Dirección</label>
+                <input type="text" name="direccion" class="form-control"
+                       value="{{ proveedor.direccion if proveedor else '' }}" placeholder="Av. Industrial 123, Lima">
+            </div>
+            <div class="d-flex gap-2">
+                <button type="submit" class="btn btn-naranja px-4">
+                    <i class="fa fa-save me-1"></i>
+                    {% if proveedor %}Actualizar{% else %}Registrar{% endif %}
+                </button>
+                <a href="/proveedores" class="btn btn-outline-secondary px-4">Cancelar</a>
+            </div>
+        </form>
+    </div>
+</div>
+
+<script>
+const tel = document.getElementById('campoTelProv');
+const feedback = document.getElementById('telProvFeedback');
+tel.addEventListener('input', function() {
+    const v = this.value;
+    if (v.length === 0) {
+        feedback.textContent = '';
+        this.classList.remove('is-valid','is-invalid');
+    } else if (v.length < 9) {
+        feedback.textContent = `Faltan ${9 - v.length} dígito(s)`;
+        feedback.style.color = '#dc3545';
+        this.classList.add('is-invalid'); this.classList.remove('is-valid');
+    } else {
+        feedback.textContent = '✓ Número válido';
+        feedback.style.color = '#28a745';
+        this.classList.add('is-valid'); this.classList.remove('is-invalid');
+    }
+});
+
+document.getElementById('formProveedor').addEventListener('submit', function(e) {
+    const v = tel.value;
+    if (v.length > 0 && v.length !== 9) {
+        e.preventDefault();
+        tel.focus();
+        feedback.textContent = 'El teléfono debe tener exactamente 9 dígitos';
+        feedback.style.color = '#dc3545';
+        tel.classList.add('is-invalid');
+    }
+});
+</script>
+{% endblock %}

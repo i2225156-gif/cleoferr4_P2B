@@ -1,0 +1,110 @@
+{% extends 'base.html' %}
+{% block titulito %}Reportes – Cleoferr{% endblock %}
+{% block contenido %}
+
+<div class="page-header">
+    <div>
+        <h2><i class="fa fa-chart-line me-2"></i>REPORTES</h2>
+        <p>Panel de reportes. Genera y exporta reportes por ventas, inventario y pedidos.</p>
+    </div>
+    <div class="d-flex gap-2">
+        <a href="/reportes/dia/exportar" class="btn btn-outline-secondary"><i class="fa fa-file-export me-1"></i>Exportar (hoy)</a>
+    </div>
+</div>
+
+<div class="row g-3 mb-3">
+    <div class="col-md-4">
+        <div class="card card-custom stat-card">
+            <div class="d-flex align-items-center gap-3">
+                <div class="stat-icon"><i class="fa fa-money-bill-wave"></i></div>
+                <div>
+                    <div class="stat-value">{{ resumen.ventas_hoy or '0' }}</div>
+                    <div class="stat-label">Ventas hoy</div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card card-custom stat-card">
+            <div class="d-flex align-items-center gap-3">
+                <div class="stat-icon"><i class="fa fa-warehouse"></i></div>
+                <div>
+                    <div class="stat-value">{{ resumen.stock_total or '0' }}</div>
+                    <div class="stat-label">Stock total</div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card card-custom stat-card">
+            <div class="d-flex align-items-center gap-3">
+                <div class="stat-icon"><i class="fa fa-exclamation-triangle"></i></div>
+                <div>
+                    <div class="stat-value">{{ resumen.alertas or '0' }}</div>
+                    <div class="stat-label">Alertas</div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card card-custom">
+    <div class="card-header">
+        <i class="fa fa-filter me-2"></i>Generar Reporte
+    </div>
+    <div class="card-body">
+        <form method="GET" action="/reportes/generar" class="row g-3">
+            <div class="col-md-3">
+                <label class="form-label fw-semibold">Tipo de reporte</label>
+                <select name="tipo" class="form-select">
+                    <option value="ventas">Ventas</option>
+                    <option value="productos">Productos</option>
+                    <option value="inventario">Inventario</option>
+                    <option value="pedidos">Pedidos</option>
+                </select>
+            </div>
+            <div class="col-md-3">
+                <label class="form-label fw-semibold">Fecha desde</label>
+                <input type="date" name="desde" class="form-control">
+            </div>
+            <div class="col-md-3">
+                <label class="form-label fw-semibold">Fecha hasta</label>
+                <input type="date" name="hasta" class="form-control">
+            </div>
+            <div class="col-md-3 d-flex align-items-end gap-2">
+                <button class="btn btn-naranja"><i class="fa fa-chart-line me-1"></i>Generar</button>
+                <a href="/reportes/exportar" class="btn btn-outline-secondary">Exportar</a>
+            </div>
+        </form>
+    </div>
+</div>
+
+{% if reportes %}
+<div class="card card-custom mt-3">
+    <div class="card-header"><i class="fa fa-table me-2"></i>Resultados</div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-custom table-hover mb-0">
+                <thead>
+                    <tr>
+                        {% for h in reportes.headers %}
+                        <th>{{ h }}</th>
+                        {% endfor %}
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in reportes.rows %}
+                    <tr>
+                        {% for cell in row %}
+                        <td>{{ cell }}</td>
+                        {% endfor %}
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+{% endblock %}

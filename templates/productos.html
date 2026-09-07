@@ -1,0 +1,248 @@
+{% extends 'base.html' %}
+{% block titulito %}Productos – Cleoferr{% endblock %}
+{% block contenido %}
+
+<div class="page-header">
+    <div>
+        <h2><i class="fa fa-box me-2"></i>GESTIÓN DE PRODUCTOS</h2>
+        <p>Administra los productos registrados. Usa búsquedas, filtros por categoría/marca y exporta listados. Total: {{ productos|length }}</p>
+    </div>
+    <div class="d-flex gap-2">
+        {% if session.rol in ['administrador','vendedor'] %}
+        <a href="/productos/nuevo" class="btn btn-naranja">
+            <i class="fa fa-plus me-1"></i> Nuevo Producto
+        </a>
+        {% endif %}
+        <a href="/reportes/productos/exportar" class="btn btn-outline-secondary">
+            <i class="fa fa-file-export me-1"></i> Exportar (Excel)
+        </a>
+    </div>
+</div>
+
+{# Dashboard breve para administradores/vendedores #}
+{% if session.rol in ['administrador','vendedor'] %}
+<div class="row g-3 mb-3">
+    <div class="col-md-4">
+        <div class="card card-custom stat-card">
+            <div class="d-flex align-items-center gap-3">
+                <div class="stat-icon"><i class="fa fa-receipt"></i></div>
+                <div>
+                    <div class="stat-value">{{ pedidos_count if pedidos_count is defined else '-' }}</div>
+                    <div class="stat-label">Pedidos</div>
+                </div>
+            </div>
+            <div class="mt-3">
+                <a href="/pedidos" class="btn btn-outline-info btn-sm">Ver pedidos</a>
+                <a href="/reportes/pedidos/exportar" class="btn btn-outline-secondary btn-sm ms-2">Exportar</a>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card card-custom stat-card">
+            <div class="d-flex align-items-center gap-3">
+                <div class="stat-icon"><i class="fa fa-chart-line"></i></div>
+                <div>
+                    <div class="stat-value">{{ reportes_count if reportes_count is defined else '-' }}</div>
+                    <div class="stat-label">Reportes</div>
+                </div>
+            </div>
+            <div class="mt-3">
+                <a href="/reportes" class="btn btn-outline-info btn-sm">Ir a reportes</a>
+                <a href="/reportes/dia/exportar" class="btn btn-outline-secondary btn-sm ms-2">Exportar hoy</a>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card card-custom stat-card">
+            <div class="d-flex align-items-center gap-3">
+                <div class="stat-icon"><i class="fa fa-bell"></i></div>
+                <div>
+                    <div class="stat-value">{{ alertas_count if alertas_count is defined else '-' }}</div>
+                    <div class="stat-label">Alertas</div>
+                </div>
+            </div>
+            <div class="mt-3">
+                <a href="/alertas" class="btn btn-outline-info btn-sm">Ver alertas</a>
+                <a href="/alertas/programar" class="btn btn-outline-secondary btn-sm ms-2">Programar</a>
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+{% if bajo_stock %}
+<div class="alert alert-danger d-flex align-items-center justify-content-between py-2 px-3 mb-3" role="alert">
+    <div>
+        <i class="fa fa-exclamation-triangle me-2"></i>
+        <strong>{{ bajo_stock|length }} producto(s)</strong> con stock insuficiente
+        <small class="ms-2 text-muted">(stock &lt; 15)</small>
+    </div>
+    <a href="/alertas" class="btn btn-sm btn-outline-danger">
+        <i class="fa fa-bell me-1"></i>Ver alertas
+    </a>
+</div>
+
+<div class="row g-2 mb-3">
+    {% for p in bajo_stock[:6] %}
+    <div class="col-md-4 col-lg-2">
+        <div class="card card-custom text-center py-2 px-1 h-100
+            {% if p.stock == 0 %}border-danger
+            {% elif p.stock < 5 %}border-danger
+            {% elif p.stock < 10 %}border-warning
+            {% else %}border-info
+            {% endif %}"
+            style="box-shadow:none;background:
+            {% if p.stock == 0 %}#fce4e4
+            {% elif p.stock < 5 %}#fce4e4
+            {% elif p.stock < 10 %}#fff8e1
+            {% else %}#e3f2fd
+            {% endif %}">
+            <div class="fw-bold small text-truncate">{{ p.nombre }}</div>
+            <div class="fw-bold fs-4
+                {% if p.stock == 0 %}text-danger
+                {% elif p.stock < 5 %}text-danger
+                {% elif p.stock < 10 %}text-warning
+                {% else %}text-info
+                {% endif %}">{{ p.stock }}</div>
+            <div class="small text-muted">stock</div>
+        </div>
+    </div>
+    {% endfor %}
+    {% if bajo_stock|length > 6 %}
+    <div class="col-md-4 col-lg-2 d-flex align-items-center justify-content-center">
+        <small class="text-muted">+{{ bajo_stock|length - 6 }} más</small>
+    </div>
+    {% endif %}
+</div>
+{% endif %}
+
+<!-- Filtros -->
+<div class="card card-custom mb-3">
+    <div class="card-body py-3">
+        <form method="GET" class="row g-2 align-items-end">
+            <div class="col-md-4">
+                <label class="form-label fw-semibold mb-1"><i class="fa fa-tag me-1"></i>Categoría</label>
+                <select name="categoria" class="form-select">
+                    <option value="">Todas las categorías</option>
+                    {% for c in categorias %}
+                        <option value="{{ c.nombre }}" {% if request.args.get('categoria') == c.nombre %}selected{% endif %}>
+                            {{ c.nombre }}
+                        </option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-4">
+                <label class="form-label fw-semibold mb-1"><i class="fa fa-industry me-1"></i>Marca</label>
+                <select name="marca" class="form-select">
+                    <option value="">Todas las marcas</option>
+                    {% for m in marcas %}
+                        <option value="{{ m.nombre }}" {% if request.args.get('marca') == m.nombre %}selected{% endif %}>
+                            {{ m.nombre }}
+                        </option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-2">
+                <button type="submit" class="btn btn-naranja w-100"><i class="fa fa-search me-1"></i>Filtrar</button>
+            </div>
+            <div class="col-md-2">
+                <a href="/productos" class="btn btn-outline-secondary w-100"><i class="fa fa-times me-1"></i>Limpiar</a>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Tabla -->
+<div class="card card-custom">
+    <div class="card-header">
+        <i class="fa fa-list me-2"></i>Listado de Productos
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-custom table-hover mb-0">
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th>Imagen</th>
+                        <th>Nombre</th>
+                        <th>Categoría</th>
+                        <th>Marca</th>
+                        <th>Precio</th>
+                        <th>Stock</th>
+                        <th>Estado</th>
+                        {% if session.rol in ['administrador','vendedor'] %}<th>Acciones</th>{% endif %}
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for p in productos %}
+                    <tr>
+                        <td><span class="fw-bold text-muted">{{ p.id_producto }}</span></td>
+                        <td>
+                            {% if p.imagen %}
+                                <img src="{{ url_for('static', filename='img/' ~ p.imagen) }}"
+                                     class="producto-img" alt="{{ p.nombre }}"
+                                     onerror="this.style.display='none'; this.nextElementSibling.style.display='flex'">
+                                <div class="producto-img-placeholder" style="display:none">
+                                    <i class="fa fa-wrench"></i>
+                                </div>
+                            {% else %}
+                                <div class="producto-img-placeholder">
+                                    <i class="fa fa-wrench"></i>
+                                </div>
+                            {% endif %}
+                        </td>
+                        <td>
+                            <div class="fw-semibold">{{ p.nombre }}</div>
+                            <small class="text-muted">{{ p.descripcion|truncate(50) if p.descripcion else '' }}</small>
+                        </td>
+                        <td><span class="badge bg-secondary">{{ p.categoria or '–' }}</span></td>
+                        <td>{{ p.marca or '–' }}</td>
+                        <td><span class="fw-bold" style="color: var(--naranja)">S/ {{ "%.2f"|format(p.precio|float) }}</span></td>
+                        <td>
+                            {% if p.stock <= 5 %}
+                                <span class="badge bg-danger">{{ p.stock }}</span>
+                            {% elif p.stock <= 20 %}
+                                <span class="badge bg-warning text-dark">{{ p.stock }}</span>
+                            {% else %}
+                                <span class="badge bg-success">{{ p.stock }}</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            <span class="badge {% if p.estado == 'activo' %}badge-activo{% else %}badge-inactivo{% endif %}">
+                                {{ p.estado }}
+                            </span>
+                        </td>
+                        {% if session.rol in ['administrador','vendedor'] %}
+                        <td>
+                            <div class="d-flex gap-1">
+                                <a href="/productos/editar/{{ p.id_producto }}" class="btn btn-sm btn-outline-warning" title="Editar">
+                                    <i class="fa fa-edit"></i>
+                                </a>
+                                {% if session.rol == 'administrador' %}
+                                <a href="/productos/eliminar/{{ p.id_producto }}" class="btn btn-sm btn-outline-danger"
+                                   onclick="return confirm('¿Eliminar este producto?')" title="Eliminar">
+                                    <i class="fa fa-trash"></i>
+                                </a>
+                                <a href="/productos/detalle/{{ p.id_producto }}" class="btn btn-sm btn-outline-info" title="Ver detalles">
+                                    <i class="fa fa-eye"></i>
+                                </a>
+                                {% endif %}
+                            </div>
+                        </td>
+                        {% endif %}
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="9" class="text-center py-5 text-muted">
+                            <i class="fa fa-box-open fa-2x mb-2 d-block"></i>
+                            No se encontraron productos
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+{% endblock %}

@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block titulito %}Cleoferr{% endblock %}</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        :root {
+            /* Paleta actualizada: azul acero como color principal */
+            --azul: #4682B4; /* steelblue (azul acero) */
+            --azul-oscuro: #2E5E85;
+            --azul-claro: #6BA8DF;
+            --gris-oscuro: #1A1A2E;
+            --gris-medio: #16213E;
+            --amarillo: #FFC107;
+            --blanco: #FFFFFF;
+            --fondo: #F5F5F5;
+
+            /* Mantener variables antiguas por compatibilidad si hay referencias */
+            --naranja: var(--azul);
+            --naranja-oscuro: var(--azul-oscuro);
+            --naranja-claro: var(--azul-claro);
+        }
+
+        body {
+            background: var(--fondo);
+            font-family: 'Segoe UI', sans-serif;
+        }
+
+        /* ── Navbar ── */
+        .navbar-cleoferr {
+            background: linear-gradient(135deg, var(--gris-oscuro) 0%, var(--gris-medio) 100%);
+            border-bottom: 3px solid var(--azul);
+            padding: 0.5rem 1rem;
+        }
+
+        .navbar-brand-custom {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            color: var(--blanco) !important;
+            font-size: 1.4rem;
+            font-weight: 700;
+            text-decoration: none;
+        }
+
+        .navbar-brand-custom .brand-icon {
+            width: 40px;
+            height: 40px;
+            background: var(--azul);
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.2rem;
+        }
+
+        .nav-menu {
+            display: flex;
+            gap: 4px;
+        }
+
+        .nav-menu .nav-link-custom {
+            color: rgba(255,255,255,0.8) !important;
+            padding: 6px 14px;
+            border-radius: 6px;
+            font-size: 0.88rem;
+            font-weight: 500;
+            transition: all 0.2s;
+            text-decoration: none;
+        }
+
+        .nav-menu .nav-link-custom:hover,
+        .nav-menu .nav-link-custom.active {
+            background: var(--azul);
+            color: var(--blanco) !important;
+        }
+
+        .nav-user {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .badge-rol {
+            background: var(--azul);
+            color: white;
+            padding: 3px 10px;
+            border-radius: 20px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+
+        .btn-nav {
+            background: transparent;
+            border: 1px solid rgba(255,255,255,0.4);
+            color: white;
+            padding: 5px 12px;
+            border-radius: 6px;
+            font-size: 0.82rem;
+            transition: all 0.2s;
+            text-decoration: none;
+        }
+
+        .btn-nav:hover {
+            background: var(--azul);
+            border-color: var(--azul);
+            color: white;
+        }
+
+        /* ── Hero banner (solo inicio de sección) ── */
+        .page-header {
+            background: linear-gradient(135deg, var(--gris-oscuro), var(--azul-oscuro));
+            color: white;
+            padding: 20px 28px;
+            border-radius: 12px;
+            margin-bottom: 24px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .page-header h2 {
+            margin: 0;
+            font-weight: 700;
+            font-size: 1.5rem;
+        }
+
+        .page-header p {
+            margin: 4px 0 0;
+            opacity: 0.8;
+            font-size: 0.9rem;
+        }
+
+        /* ── Botones ── */
+        .btn-naranja {
+            /* nombre de clase conservado por compatibilidad, estilo actualizado a azul */
+            background: var(--azul);
+            border-color: var(--azul);
+            color: white;
+            font-weight: 600;
+        }
+
+        .btn-naranja:hover {
+            background: var(--azul-oscuro);
+            border-color: var(--azul-oscuro);
+            color: white;
+        }
+
+        /* ── Tarjetas ── */
+        .card-custom {
+            border: none;
+            border-radius: 12px;
+            box-shadow: 0 2px 16px rgba(0,0,0,0.08);
+            overflow: hidden;
+        }
+
+        .card-custom .card-header {
+            background: linear-gradient(90deg, var(--gris-oscuro), var(--gris-medio));
+            color: white;
+            font-weight: 700;
+            padding: 14px 20px;
+            border-bottom: 2px solid var(--azul);
+        }
+
+        /* ── Tablas ── */
+        .table-custom thead {
+            background: var(--gris-oscuro);
+            color: white;
+        }
+
+        .table-custom thead th {
+            border: none;
+            padding: 12px 16px;
+            font-weight: 600;
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .table-custom tbody tr {
+            transition: background 0.15s;
+        }
+
+        .table-custom tbody tr:hover {
+            background: rgba(70,130,180,0.06); /* hover suave con azul */
+        }
+
+        .table-custom tbody td {
+            padding: 11px 16px;
+            vertical-align: middle;
+            border-color: #f0f0f0;
+        }
+
+        /* ── Badges ── */
+        .badge-activo   { background: #28a745; color: white; }
+        .badge-inactivo { background: #6c757d; color: white; }
+        .badge-entrada  { background: #28a745; color: white; }
+        .badge-salida   { background: var(--azul); color: white; }
+
+        /* ── Badges de estado de pedido ── */
+        .badge-estado { padding: 5px 14px; border-radius: 20px; font-size: 0.8rem; font-weight: 700; letter-spacing: 0.5px; display:inline-block; }
+        .badge-pendiente  { background: #fff3cd; color: #856404; border: 1px solid #ffc107; }
+        .badge-confirmado { background: #cfe2ff; color: #084298; border: 1px solid #84b6f4; }
+        .badge-preparando { background: #ffe5d0; color: #a0440a; border: 1px solid #fd7e14; }
+        .badge-listo      { background: #d1e7dd; color: #0f5132; border: 1px solid #75b798; }
+        .badge-entregado  { background: #28a745; color: white;   border: 1px solid #1e7e34; }
+        .badge-cancelado  { background: #f8d7da; color: #842029; border: 1px solid #f1aeb5; }
+
+        /* ── Modo oscuro ── */
+        body.dark-mode {
+            --fondo: #0d1117;
+            background: #0d1117 !important;
+            color: #c9d1d9;
+        }
+        body.dark-mode .card-custom,
+        body.dark-mode .stat-card,
+        body.dark-mode .table-custom tbody tr { background: #161b22; color: #c9d1d9; }
+        body.dark-mode .table-custom tbody td { border-color: #21262d; color: #c9d1d9; }
+        body.dark-mode .table-custom tbody tr:hover { background: #1f2937; }
+        body.dark-mode .form-control,
+        body.dark-mode .form-select { background: #0d1117; color: #c9d1d9; border-color: #30363d; }
+        body.dark-mode .form-control:focus,
+        body.dark-mode .form-select:focus { border-color: var(--azul-claro); }
+        body.dark-mode .modal-content { background: #161b22; color: #c9d1d9; }
+        body.dark-mode .modal-header { border-color: #30363d; }
+        body.dark-mode .dropdown-menu { background: #161b22; border-color: #30363d; }
+        body.dark-mode .dropdown-item { color: #c9d1d9; }
+        body.dark-mode .dropdown-item:hover { background: #21262d; }
+        body.dark-mode input, body.dark-mode textarea, body.dark-mode select { color: #c9d1d9; }
+
+        /* Botón dark/light */
+        #btnTema {
+            background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2);
+            color: white; border-radius: 8px; padding: 6px 12px; cursor: pointer;
+            font-size: 0.85rem; transition: all 0.2s; margin-left: 8px;
+        }
+        #btnTema:hover { background: rgba(255,255,255,0.2); }
+
+        /* ── Stats cards ── */
+        .stat-card {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 2px 12px rgba(0,0,0,0.07);
+            border-left: 4px solid var(--azul);
+        }
+
+        .stat-card .stat-icon {
+            width: 48px;
+            height: 48px;
+            background: rgba(70,130,180,0.12);
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.3rem;
+            color: var(--azul);
+        }
+
+        .stat-card .stat-value {
+            font-size: 1.8rem;
+            font-weight: 700;
+            color: var(--gris-oscuro);
+        }
+
+        .stat-card .stat-label {
+            color: #777;
+            font-size: 0.85rem;
+        }
+
+        /* ── Alerts ── */
+        .alert {
+            border-radius: 8px;
+            border: none;
+        }
+
+        /* ── Forms ── */
+        .form-control:focus, .form-select:focus {
+            border-color: var(--azul);
+            box-shadow: 0 0 0 0.2rem rgba(70,130,180,0.15);
+        }
+
+        /* ── Footer ── */
+        footer {
+            margin-top: 60px;
+            padding: 20px;
+            text-align: center;
+            color: #999;
+            font-size: 0.82rem;
+            border-top: 1px solid #e0e0e0;
+        }
+
+        /* ── Producto imagen ── */
+        .producto-img {
+            width: 52px;
+            height: 52px;
+            object-fit: cover;
+            border-radius: 8px;
+            border: 2px solid #eee;
+        }
+
+        .producto-img-placeholder {
+            width: 52px;
+            height: 52px;
+            background: linear-gradient(135deg, var(--azul), var(--azul-claro));
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 1.2rem;
+        }
+
+        /* ── Quick access (barra de accesos rápidos) ── */
+        .quick-access {
+            display:flex;
+            gap:8px;
+            padding:8px 12px;
+            background: linear-gradient(90deg, rgba(70,130,180,0.06), rgba(70,130,180,0.03));
+            border-bottom: 1px solid rgba(70,130,180,0.06);
+            align-items:center;
+            flex-wrap:wrap;
+        }
+        .quick-access a {
+            display:inline-flex; gap:8px; align-items:center;
+            padding:6px 10px; border-radius:8px;
+            background:transparent; color:var(--azul-oscuro);
+            text-decoration:none; font-weight:700; font-size:0.85rem;
+            border:1px solid rgba(70,130,180,0.08);
+        }
+        .quick-access a:hover { background:var(--azul); color:white; border-color:var(--azul); }
+        .quick-access .qa-label { font-size:0.78rem; color:#666; margin-right:8px; }
+    </style>
+</head>
+<body>
+
+<nav class="navbar navbar-cleoferr navbar-expand-lg">
+  <div class="container-fluid">
+    <a class="navbar-brand-custom" href="/productos">
+      <div align="center">
+        <img src="{{ url_for('static', filename='img/logo-ic.jpeg') }}" 
+             alt="Cleoferr Logo" 
+             width="100" height="100" 
+             style="border-radius: 50%;">
+      </div>
+    </a>
+
+        {% if session.usuario_id and session.rol != 'cliente' %}
+        <div class="nav-menu mx-3">
+            <a class="nav-link-custom {% if request.path == '/productos' %}active{% endif %}" href="/productos">
+                <i class="fa fa-box me-1"></i>Productos
+            </a>
+            <a class="nav-link-custom {% if '/clientes' in request.path %}active{% endif %}" href="/clientes">
+                <i class="fa fa-users me-1"></i>Clientes
+            </a>
+            <a class="nav-link-custom {% if '/proveedores' in request.path %}active{% endif %}" href="/proveedores">
+                <i class="fa fa-truck me-1"></i>Proveedores
+            </a>
+            <a class="nav-link-custom {% if '/inventario' in request.path %}active{% endif %}" href="/inventario">
+                <i class="fa fa-warehouse me-1"></i>Inventario
+            </a>
+            <a class="nav-link-custom {% if '/alertas' in request.path %}active{% endif %}" href="/alertas">
+                <i class="fa fa-bell me-1"></i>Alertas
+            </a>
+        </div>
+        {% endif %}
+
+        {% if session.usuario_id %}
+        <div class="nav-user ms-auto">
+            <span style="color:rgba(255,255,255,0.8); font-size:0.85rem;">
+                <i class="fa fa-user me-1"></i>{{ session.nombre }}
+            </span>
+            <span class="badge-rol">{{ session.rol }}</span>
+            {% if session.rol != 'cliente' %}
+                <a class="btn-nav" href="/cambiar_clave">
+                    <i class="fa fa-key me-1"></i>Clave
+                </a>
+            {% endif %}
+            <button id="btnTema" onclick="toggleTema()" title="Cambiar tema">
+                <i class="fa fa-moon" id="iconTema"></i>
+            </button>
+            <a class="btn-nav" href="/logout">
+                <i class="fa fa-sign-out-alt me-1"></i>Salir
+            </a>
+        </div>
+        {% endif %}
+    </div>
+</nav>
+
+<div class="container-fluid px-4 py-3">
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            {% for category, message in messages %}
+                <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
+                    <i class="fa {% if category == 'success' %}fa-check-circle{% else %}fa-exclamation-circle{% endif %} me-2"></i>
+                    {{ message }}
+                    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                </div>
+            {% endfor %}
+        {% endif %}
+    {% endwith %}
+
+    {% block contenido %}{% endblock %}
+</div>
+
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+// ── Modo claro / oscuro ──────────────────────────────
+function toggleTema() {
+    const dark = document.body.classList.toggle('dark-mode');
+    localStorage.setItem('cleoferr_tema', dark ? 'dark' : 'light');
+    document.getElementById('iconTema').className = dark ? 'fa fa-sun' : 'fa fa-moon';
+}
+// Aplicar preferencia guardada al cargar
+(function() {
+    const pref = localStorage.getItem('cleoferr_tema');
+    if (pref === 'dark') {
+        document.body.classList.add('dark-mode');
+        const icon = document.getElementById('iconTema');
+        if (icon) icon.className = 'fa fa-sun';
+    }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,173 @@
+{% extends 'base.html' %}
+{% block titulito %}Inventario – Cleoferr{% endblock %}
+{% block contenido %}
+
+<div class="page-header">
+    <div>
+        <h2><i class="fa fa-warehouse me-2"></i>INVENTARIO & REPORTES</h2>
+        <p>Revisa stocks actuales, registra entradas y salidas. Genera reportes e historial con filtros por fecha, producto o usuario.</p>
+    </div>
+</div>
+
+<!-- Formulario registro movimiento -->
+<div class="card card-custom mb-4">
+    <div class="card-header">
+        <i class="fa fa-exchange-alt me-2"></i>Registrar Movimiento
+    </div>
+    <div class="card-body">
+        <form method="POST" action="/inventario/registrar">
+            <div class="row g-3">
+                <div class="col-md-2">
+                    <label class="form-label fw-semibold">Tipo</label>
+                    <select name="tipo" class="form-select" id="tipoSelect" required>
+                        <option value="entrada">📦 Entrada</option>
+                        <option value="salida">📤 Salida</option>
+                    </select>
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label fw-semibold">Producto</label>
+                    <select name="id_producto" class="form-select" required>
+                        <option value="">-- Seleccionar --</option>
+                        {% for p in productos %}
+                            <option value="{{ p.id_producto }}">{{ p.nombre }} (Stock: {{ p.stock }})</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <!-- Campo proveedor (solo para entradas) -->
+                <div class="col-md-3" id="proveedorField">
+                    <label class="form-label fw-semibold">Proveedor</label>
+                    <select name="id_proveedor" class="form-select">
+                        <option value="">-- Sin proveedor --</option>
+                        {% for pr in proveedores %}
+                            <option value="{{ pr.id_proveedor }}">{{ pr.nombre }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <!-- Campo vendedor (solo para salidas) -->
+                <div class="col-md-3 d-none" id="vendedorField">
+                    <label class="form-label fw-semibold">Vendedor</label>
+                    <select name="id_vendedor" class="form-select">
+                        <option value="">-- Sin vendedor --</option>
+                        {% for v in vendedores %}
+                            <option value="{{ v.id_usuario }}">{{ v.nombres }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <div class="col-md-1">
+                    <label class="form-label fw-semibold">Cantidad</label>
+                    <input type="number" name="cantidad" class="form-control" min="1" required placeholder="0">
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label fw-semibold">Precio Unit. (S/)</label>
+                    <input type="number" name="precio_unitario" class="form-control" step="0.01" min="0" placeholder="0.00">
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label fw-semibold">Observación</label>
+                    <input type="text" name="observacion" class="form-control" placeholder="Descripción opcional">
+                </div>
+                <div class="col-md-2 d-flex align-items-end">
+                    <button type="submit" class="btn btn-naranja w-100">
+                        <i class="fa fa-save me-1"></i>Registrar
+                    </button>
+                </div>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Historial -->
+<div class="card card-custom">
+    <div class="card-header">
+        <div class="d-flex align-items-center justify-content-between w-100">
+            <div><i class="fa fa-history me-2"></i>Historial de Movimientos <span class="badge bg-secondary ms-2">{{ movimientos|length }}</span></div>
+            <div class="d-flex gap-2">
+                <a href="/reportes/inventario/exportar" class="btn btn-outline-secondary btn-sm"><i class="fa fa-file-export me-1"></i>Exportar</a>
+                <a href="/reportes/inventario" class="btn btn-outline-info btn-sm"><i class="fa fa-chart-line me-1"></i>Ver reportes</a>
+            </div>
+        </div>
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-custom table-hover mb-0">
+                <thead>
+                    <tr>
+                        <th>Fecha</th>
+                        <th>Tipo</th>
+                        <th>Producto</th>
+                        <th>Proveedor</th>
+                        <th>Cantidad</th>
+                        <th>Precio Unit.</th>
+                        <th>Total</th>
+                        <th>Stock Result.</th>
+                        <th>Observación</th>
+                        <th>Usuario</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for m in movimientos %}
+                    <tr>
+                        <td><small>{{ m.fecha.strftime('%d/%m/%Y %H:%M') if m.fecha else '–' }}</small></td>
+                        <td>
+                            <span class="badge {% if m.tipo == 'entrada' %}badge-entrada{% else %}badge-salida{% endif %}">
+                                {% if m.tipo == 'entrada' %}📦 Entrada{% else %}📤 Salida{% endif %}
+                            </span>
+                        </td>
+                        <td class="fw-semibold">{{ m.producto_nombre or '–' }}</td>
+                        <td>
+                            {% if m.proveedor_nombre %}
+                                <span class="badge bg-secondary"><i class="fa fa-truck me-1"></i>{{ m.proveedor_nombre }}</span>
+                            {% else %}
+                                <span class="text-muted">–</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            <span class="fw-bold {% if m.tipo == 'entrada' %}text-success{% else %}text-danger{% endif %}">
+                                {% if m.tipo == 'entrada' %}+{% else %}–{% endif %}{{ m.cantidad }}
+                            </span>
+                        </td>
+                        <td>S/ {{ "%.2f"|format(m.precio_unitario|float) if m.precio_unitario else '0.00' }}</td>
+                        <td class="fw-semibold" style="color: var(--azul)">
+                            S/ {{ "%.2f"|format((m.precio_unitario|float) * (m.cantidad|int)) }}
+                        </td>
+                        <td><span class="badge bg-info text-dark">{{ m.stock_resultante }}</span></td>
+                        <td><small class="text-muted">{{ m.observacion or '–' }}</small></td>
+                        <td><small>{{ m.usuario_nombre or '–' }}</small></td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="10" class="text-center py-5 text-muted">
+                            <i class="fa fa-warehouse fa-2x mb-2 d-block"></i>
+                            No hay movimientos registrados
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<script>
+// Mostrar/ocultar proveedor/vendedor según tipo
+const tipoSelect = document.getElementById('tipoSelect');
+const proveedorField = document.getElementById('proveedorField');
+const vendedorField  = document.getElementById('vendedorField');
+
+function toggleProveedorVendedor() {
+    if (tipoSelect.value === 'salida') {
+        proveedorField.classList.add('d-none');
+        vendedorField.classList.remove('d-none');
+    } else {
+        proveedorField.classList.remove('d-none');
+        vendedorField.classList.add('d-none');
+    }
+}
+
+// inicializar estado y añadir listener
+toggleProveedorVendedor();
+tipoSelect.addEventListener('change', toggleProveedorVendedor);
+</script>
+{% endblock %}
