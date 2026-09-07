@@ -1246,7 +1246,17 @@ def venta_nueva_guardar():
 
     conn   = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
+    caja_activa = None
     try:
+        # Las ventas LOCALES (presenciales) requieren una caja abierta;
+        # las ventas online no dependen de la caja.
+        if tipo_venta == 'local':
+            cursor.execute("SELECT * FROM caja WHERE estado = 'abierta'")
+            caja_activa = cursor.fetchone()
+            if not caja_activa:
+                flash('No puedes registrar una venta local sin una caja abierta. Abre caja primero en /caja.', 'danger')
+                return redirect(url_for('caja'))
+
         # Crear la venta
         cursor.execute("""
             INSERT INTO venta (id_tipo_venta, id_cliente, id_usuario_vendedor, id_estado_venta)
@@ -1271,6 +1281,16 @@ def venta_nueva_guardar():
                 UPDATE producto SET stock = stock - %s WHERE id_producto = %s
             """, (cant, id_prod))
 
+        # Registrar el ingreso en caja para ventas locales
+        if tipo_venta == 'local' and caja_activa:
+            cursor.execute("""
+                INSERT INTO movimiento_caja (id_caja, tipo, monto, concepto, id_usuario)
+                SELECT %s, 'ingreso',
+                       COALESCE(SUM(cantidad * precio_unitario), 0), %s, %s
+                FROM detalle_venta WHERE id_venta = %s
+            """, (caja_activa['id_caja'], f'Venta local #{id_venta}',
+                  session.get('usuario_id'), id_venta))
+
         conn.commit()
         flash(f'Venta #{id_venta} registrada correctamente.', 'success')
         return redirect(url_for('pedidos'))
@@ -1281,6 +1301,177 @@ def venta_nueva_guardar():
         return redirect(url_for('venta_nueva_form'))
     finally:
         conn.close()
+
+
+# ── Caja (apertura / cierre / arqueo) ────────────────────────────────────────
+# UMBRAL_DIFERENCIA_CAJA: |declarado - sistema| mayor a esto se marca como advertencia
+UMBRAL_DIFERENCIA_CAJA = 20.0
+
+
+@app.route('/caja')
+@login_required
+@escritura_required
+def caja():
+    """Panel de caja: estado actual, movimientos del turno e historial de cierres."""
+    conn   = get_connection_tienda()
+    cursor = conn.cursor(dictionary=True)
+    caja_abierta = None
+    movimientos  = []
+    efectivo_sistema = 0.0
+    historial = []
+    uids = set()
+    try:
+        cursor.execute("SELECT * FROM caja WHERE estado = 'abierta' LIMIT 1")
+        caja_abierta = cursor.fetchone()
+        if caja_abierta:
+            cursor.execute("""
+                SELECT * FROM movimiento_caja
+                WHERE id_caja = %s ORDER BY fecha DESC
+            """, (caja_abierta['id_caja'],))
+            movimientos = cursor.fetchall()
+            # Solo existen 'ingreso' y 'egreso' (CHECK de la tabla)
+            efectivo_sistema = sum(
+                float(m['monto']) if m['tipo'] == 'ingreso' else -float(m['monto'])
+                for m in movimientos
+            )
+            uids.add(caja_abierta['id_usuario_apertura'])
+            uids.update(m['id_usuario'] for m in movimientos if m['id_usuario'])
+
+        cursor.execute("""
+            SELECT * FROM caja ORDER BY fecha_apertura DESC LIMIT 10
+        """)
+        historial = cursor.fetchall()
+        for h in historial:
+            if h['id_usuario_apertura']: uids.add(h['id_usuario_apertura'])
+            if h['id_usuario_cierre']:   uids.add(h['id_usuario_cierre'])
+    except Exception as e:
+        app.logger.exception("Error en /caja: %s", e)
+    finally:
+        conn.close()
+
+    # Nombres de usuarios desde la BD Auth
+    nombres = {}
+    if uids:
+        try:
+            conn_a = get_connection_auth()
+            cur_a  = conn_a.cursor(dictionary=True)
+            cur_a.execute("SELECT id_usuario, nombres FROM usuario WHERE id_usuario = ANY(%s)",
+                          (list(uids),))
+            nombres = {u['id_usuario']: u['nombres'] for u in cur_a.fetchall()}
+            conn_a.close()
+        except Exception:
+            pass
+
+    return render_template('caja.html',
+                           caja=caja_abierta,
+                           movimientos=movimientos,
+                           efectivo_sistema=efectivo_sistema,
+                           historial=historial,
+                           nombres=nombres,
+                           umbral=UMBRAL_DIFERENCIA_CAJA)
+
+
+@app.route('/caja/abrir', methods=['POST'])
+@login_required
+@escritura_required
+def caja_abrir():
+    """Abre una caja con un monto inicial (solo puede haber UNA abierta)."""
+    try:
+        monto = float(request.form.get('monto_apertura', '0') or 0)
+    except ValueError:
+        flash('Monto de apertura inválido.', 'danger')
+        return redirect(url_for('caja'))
+    if monto < 0:
+        flash('El monto de apertura no puede ser negativo.', 'danger')
+        return redirect(url_for('caja'))
+
+    conn   = get_connection_tienda()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT id_caja FROM caja WHERE estado = 'abierta' LIMIT 1")
+        if cursor.fetchone():
+            flash('Ya existe una caja abierta. Ciérrala antes de abrir otra.', 'danger')
+            return redirect(url_for('caja'))
+
+        cursor.execute("""
+            INSERT INTO caja (id_usuario_apertura, monto_apertura, estado)
+            VALUES (%s, %s, 'abierta')
+            RETURNING id_caja
+        """, (session.get('usuario_id'), monto))
+        id_caja = cursor.fetchone()['id_caja']
+        # Movimiento inicial de apertura por el monto de fondo
+        # (CHECK de la tabla solo admite 'ingreso'/'egreso'; la apertura es un ingreso)
+        cursor.execute("""
+            INSERT INTO movimiento_caja (id_caja, tipo, monto, concepto, id_usuario)
+            VALUES (%s, 'ingreso', %s, 'Apertura de caja (fondo inicial)', %s)
+        """, (id_caja, monto, session.get('usuario_id')))
+        conn.commit()
+        flash(f'Caja #{id_caja} abierta con S/ {monto:.2f}.', 'success')
+    except Exception as e:
+        conn.rollback()
+        app.logger.exception("Error abriendo caja: %s", e)
+        # El índice único parcial idx_caja_una_abierta también protege esto
+        flash('No se pudo abrir la caja (¿ya existe una abierta?).', 'danger')
+    finally:
+        conn.close()
+    return redirect(url_for('caja'))
+
+
+@app.route('/caja/cerrar', methods=['POST'])
+@login_required
+@escritura_required
+def caja_cerrar():
+    """Cierra la caja abierta: calcula el esperado y registra la diferencia."""
+    try:
+        declarado = float(request.form.get('monto_declarado', '0') or 0)
+    except ValueError:
+        flash('Monto declarado inválido.', 'danger')
+        return redirect(url_for('caja'))
+    observaciones = request.form.get('observaciones', '').strip() or None
+
+    conn   = get_connection_tienda()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT * FROM caja WHERE estado = 'abierta' LIMIT 1")
+        caja = cursor.fetchone()
+        if not caja:
+            flash('No hay ninguna caja abierta para cerrar.', 'danger')
+            return redirect(url_for('caja'))
+
+        cursor.execute("""
+            SELECT COALESCE(SUM(CASE WHEN tipo = 'ingreso' THEN monto ELSE -monto END), 0) AS sistema
+            FROM movimiento_caja WHERE id_caja = %s
+        """, (caja['id_caja'],))
+        sistema = float(cursor.fetchone()['sistema'])
+        diferencia = declarado - sistema
+
+        # El cierre se refleja solo en la fila de caja (sin movimiento_caja 'cierre');
+        # los montos quedan en la propia caja y sus movimientos del turno.
+        cursor.execute("""
+            UPDATE caja
+            SET estado = 'cerrada',
+                id_usuario_cierre = %s,
+                fecha_cierre = NOW(),
+                monto_cierre_sistema = %s,
+                monto_cierre_declarado = %s,
+                diferencia = %s,
+                observaciones = %s
+            WHERE id_caja = %s
+        """, (session.get('usuario_id'), sistema, declarado, diferencia,
+              observaciones, caja['id_caja']))
+        conn.commit()
+
+        if abs(diferencia) > UMBRAL_DIFERENCIA_CAJA:
+            flash(f'Caja #{caja["id_caja"]} cerrada. ⚠ Diferencia de S/ {diferencia:+.2f} supera el umbral (S/ {UMBRAL_DIFERENCIA_CAJA:.0f}).', 'warning')
+        else:
+            flash(f'Caja #{caja["id_caja"]} cerrada. Diferencia: S/ {diferencia:+.2f}.', 'success')
+    except Exception as e:
+        conn.rollback()
+        app.logger.exception("Error cerrando caja: %s", e)
+        flash('No se pudo cerrar la caja.', 'danger')
+    finally:
+        conn.close()
+    return redirect(url_for('caja'))
 
 
 @app.route('/pedidos/detalle/<int:id>')
@@ -2137,10 +2328,14 @@ def carrito_confirmar_v2():
         """, (session['usuario_id'], num_operacion))
         id_venta = cursor.fetchone()[0]
         try:
+            # Si hay caja abierta, asociar el pago a la caja actual
+            cursor.execute("SELECT id_caja FROM caja WHERE estado = 'abierta' LIMIT 1")
+            fila_caja  = cursor.fetchone()
+            id_caja_a  = fila_caja[0] if fila_caja else None
             cursor.execute("""
-                INSERT INTO pago (id_venta, id_tipo_pago, estado)
-                VALUES (%s, (SELECT id_tipo_pago FROM tipo_pago WHERE nombre = %s), 'pendiente')
-            """, (id_venta, metodo_db))
+                INSERT INTO pago (id_venta, id_tipo_pago, id_caja, estado)
+                VALUES (%s, (SELECT id_tipo_pago FROM tipo_pago WHERE nombre = %s), %s, 'pendiente')
+            """, (id_venta, metodo_db, id_caja_a))
         except Exception:
             pass  # tabla/columna de pago opcional; no bloquea el pedido
 
