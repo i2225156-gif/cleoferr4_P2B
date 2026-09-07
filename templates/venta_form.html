@@ -1,133 +1,305 @@
 {% extends 'base.html' %}
-{% block titulito %}Nueva Venta – Cleoferr{% endblock %}
+{% block titulito %}Nueva Venta – Cleoferr POS{% endblock %}
 {% block contenido %}
+
+<style>
+.pos-wrap { display:grid; grid-template-columns: 1fr 440px; gap:20px; align-items:start; }
+@media (max-width: 1100px) { .pos-wrap { grid-template-columns: 1fr; } }
+
+/* Panel izquierdo: buscador + catálogo */
+.pos-buscar {
+    position: sticky; top: 0; z-index: 10;
+    background: white; border-radius: 12px; padding: 14px 16px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.08); margin-bottom: 14px;
+    display: flex; gap: 10px; align-items: center;
+}
+.pos-buscar .inp-buscar {
+    flex: 1; border: 2px solid #e0e0e0; border-radius: 10px;
+    padding: 12px 16px 12px 42px; font-size: 1rem;
+}
+.pos-buscar .inp-buscar:focus { border-color: var(--azul); outline: none; box-shadow: 0 0 0 0.2rem rgba(70,130,180,0.15); }
+.pos-buscar-wrap { position: relative; flex: 1; }
+.pos-buscar-wrap i.fa-search {
+    position: absolute; left: 15px; top: 50%; transform: translateY(-50%); color: #aaa;
+}
+.pos-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px;
+    max-height: calc(100vh - 260px); overflow-y: auto; padding-right: 4px;
+}
+.pos-card {
+    background: white; border-radius: 12px; padding: 12px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.06); cursor: pointer;
+    border: 2px solid transparent; transition: all 0.15s; text-align: left;
+}
+.pos-card:hover { border-color: var(--azul); transform: translateY(-2px); }
+.pos-card .p-nombre { font-weight: 700; font-size: 0.88rem; color: var(--gris-oscuro); min-height: 2.2em; }
+.pos-card .p-precio { color: var(--azul-oscuro); font-weight: 800; font-size: 1.05rem; margin-top: 4px; }
+.pos-card .p-stock { font-size: 0.75rem; color: #888; }
+.pos-card.sin-stock { opacity: 0.45; cursor: not-allowed; }
+.pos-card .p-codigo { font-size: 0.7rem; color: #bbb; font-family: monospace; }
+
+/* Panel derecho: ticket */
+.pos-ticket { background: white; border-radius: 12px; box-shadow: 0 2px 16px rgba(0,0,0,0.1); overflow: hidden; position: sticky; top: 14px; }
+.pos-ticket-head {
+    background: linear-gradient(135deg, var(--gris-oscuro), var(--azul-oscuro));
+    color: white; padding: 14px 18px; display: flex; justify-content: space-between; align-items: center;
+}
+.pos-ticket-head h3 { margin: 0; font-size: 1.05rem; font-weight: 800; }
+.pos-items { max-height: 38vh; overflow-y: auto; }
+.pos-item {
+    display: grid; grid-template-columns: 1fr auto auto; gap: 8px; align-items: center;
+    padding: 10px 14px; border-bottom: 1px solid #f0f0f0;
+}
+.pos-item .it-nombre { font-weight: 600; font-size: 0.85rem; color: #333; }
+.pos-item .it-precio { font-size: 0.78rem; color: #999; }
+.pos-item .qty-box { display: flex; align-items: center; gap: 4px; }
+.pos-item .qty-box button {
+    width: 26px; height: 26px; border-radius: 6px; border: 1px solid #ddd;
+    background: #f8f9fa; cursor: pointer; font-weight: 700;
+}
+.pos-item .qty-box button:hover { background: var(--azul); color: white; border-color: var(--azul); }
+.pos-item .qty-box input {
+    width: 46px; text-align: center; border: 1px solid #ddd; border-radius: 6px; padding: 3px;
+}
+.pos-item .it-subtotal { font-weight: 700; color: var(--azul-oscuro); min-width: 70px; text-align: right; font-size: 0.9rem; }
+.pos-item .it-del { border: none; background: transparent; color: #c62828; cursor: pointer; }
+
+.pos-total-bar {
+    background: var(--gris-oscuro); color: white; padding: 16px 18px;
+    display: flex; justify-content: space-between; align-items: center;
+}
+.pos-total-bar .t-label { font-size: 0.85rem; opacity: 0.8; text-transform: uppercase; letter-spacing: 1px; }
+.pos-total-bar .t-total { font-size: 2rem; font-weight: 800; color: var(--azul-claro); }
+
+.pos-controles { padding: 14px 16px; }
+.pos-controles .form-label { font-size: 0.8rem; font-weight: 700; }
+.pos-metodos { display: flex; gap: 6px; margin-bottom: 12px; }
+.pos-metodos .metodo {
+    flex: 1; text-align: center; padding: 10px 4px; border: 2px solid #e0e0e0; border-radius: 10px;
+    cursor: pointer; font-weight: 700; font-size: 0.8rem; color: #888; transition: all 0.15s;
+}
+.pos-metodos .metodo input { display: none; }
+.pos-metodos .metodo i { display: block; font-size: 1.1rem; margin-bottom: 3px; }
+.pos-metodos .metodo.activo { border-color: var(--azul); color: var(--azul); background: rgba(70,130,180,0.08); }
+.pos-cobrar {
+    width: 100%; padding: 14px; border: none; border-radius: 12px;
+    background: linear-gradient(135deg, var(--azul), var(--azul-claro));
+    color: white; font-weight: 800; font-size: 1.05rem; cursor: pointer;
+}
+.pos-cobrar:hover { background: linear-gradient(135deg, var(--azul-oscuro), var(--azul)); }
+.pos-cobrar:disabled { background: #bbb; cursor: not-allowed; }
+.pos-vacio { text-align: center; padding: 40px 20px; color: #bbb; }
+.pos-vacio i { font-size: 2.5rem; display: block; margin-bottom: 8px; }
+</style>
 
 <div class="page-header">
     <div>
-        <h2><i class="fa fa-cart-plus me-2"></i>NUEVA VENTA</h2>
-        <p>Registra una venta local u online y descuenta el stock automáticamente.</p>
+        <h2><i class="fa fa-cash-register me-2"></i>PUNTO DE VENTA</h2>
+        <p>Busca productos, agrégalos al ticket y cobra. Solo ventas locales (requiere caja abierta).</p>
     </div>
     <a href="/pedidos" class="btn btn-outline-secondary">
         <i class="fa fa-arrow-left me-1"></i> Volver
     </a>
 </div>
 
-<form method="POST" action="/ventas/nueva" id="formVenta">
+<form method="POST" action="/ventas/nueva" id="formVenta" onsubmit="return validarVenta()">
+<div class="pos-wrap">
 
-    <div class="card card-custom mb-3">
-        <div class="card-header"><i class="fa fa-info-circle me-2"></i>Datos generales</div>
-        <div class="card-body row g-3">
-            <div class="col-md-6">
-                <label class="form-label fw-semibold">Cliente</label>
-                <select name="id_cliente" class="form-select">
-                    <option value="">— Sin cliente (venta anónima) —</option>
+    <!-- ══════ IZQUIERDA: buscador + catálogo ══════ -->
+    <div>
+        <div class="pos-buscar">
+            <div class="pos-buscar-wrap">
+                <i class="fa fa-search"></i>
+                <input type="text" id="buscarProd" class="inp-buscar"
+                       placeholder="Buscar por nombre o código..." autocomplete="off">
+            </div>
+            <span class="badge" style="background:var(--azul);font-size:0.8rem" id="contadorEncontrados">0</span>
+        </div>
+        <div class="pos-grid" id="gridProductos"></div>
+    </div>
+
+    <!-- ══════ DERECHA: ticket ══════ -->
+    <div>
+        <div class="pos-ticket">
+            <div class="pos-ticket-head">
+                <h3><i class="fa fa-receipt me-2"></i>Ticket de venta</h3>
+                <button type="button" class="btn btn-sm" style="color:#ffb3b3;border:1px solid #ffb3b3"
+                        onclick="vaciarCarrito()" title="Vaciar">
+                    <i class="fa fa-trash"></i>
+                </button>
+            </div>
+
+            <div class="pos-items" id="listaItems">
+                <div class="pos-vacio" id="vacioMsg">
+                    <i class="fa fa-basket-shopping"></i>
+                    Agrega productos desde el catálogo
+                </div>
+            </div>
+
+            <div class="pos-total-bar">
+                <span class="t-label">Total</span>
+                <span class="t-total" id="totalVenta">S/ 0.00</span>
+            </div>
+
+            <div class="pos-controles">
+                <label class="form-label">Cliente</label>
+                <select name="id_cliente" class="form-select form-select-sm mb-2">
+                    <option value="">— Venta anónima —</option>
                     {% for c in clientes %}
                     <option value="{{ c.id_cliente }}">{{ c.nombre }} {% if c.telefono %}({{ c.telefono }}){% endif %}</option>
                     {% endfor %}
                 </select>
+
+                <label class="form-label">Método de pago</label>
+                <div class="pos-metodos">
+                    <label class="metodo activo">
+                        <input type="radio" name="metodo_pago" value="efectivo" checked>
+                        <i class="fa fa-money-bill-wave"></i>Efectivo
+                    </label>
+                    <label class="metodo">
+                        <input type="radio" name="metodo_pago" value="yape">
+                        <i class="fa fa-mobile-screen"></i>Yape/Plin
+                    </label>
+                    <label class="metodo">
+                        <input type="radio" name="metodo_pago" value="tarjeta">
+                        <i class="fa fa-credit-card"></i>Tarjeta
+                    </label>
+                </div>
+
+                <input type="hidden" name="tipo_venta" value="local">
+                <button type="submit" class="pos-cobrar" id="btnCobrar" disabled>
+                    <i class="fa fa-check-circle me-2"></i>COBRAR <span id="totalBtn">S/ 0.00</span>
+                </button>
             </div>
-            <div class="col-md-6">
-                <label class="form-label fw-semibold">Tipo de venta</label>
-                <select name="tipo_venta" class="form-select">
-                    <option value="local">Local (presencial)</option>
-                    <option value="online">Online</option>
-                </select>
-            </div>
         </div>
     </div>
+</div>
 
-    <div class="card card-custom mb-3">
-        <div class="card-header d-flex justify-content-between align-items-center">
-            <span><i class="fa fa-box me-2"></i>Productos</span>
-            <button type="button" class="btn btn-sm btn-naranja" onclick="agregarFila()">
-                <i class="fa fa-plus me-1"></i>Agregar producto
-            </button>
-        </div>
-        <div class="card-body p-0">
-            <table class="table table-custom mb-0" id="tablaProductos">
-                <thead>
-                    <tr>
-                        <th>Producto</th>
-                        <th>Precio unit. (S/)</th>
-                        <th>Cantidad</th>
-                        <th>Subtotal</th>
-                        <th></th>
-                    </tr>
-                </thead>
-                <tbody id="filas">
-                    <!-- filas dinámicas -->
-                </tbody>
-                <tfoot>
-                    <tr>
-                        <td colspan="3" class="text-end fw-bold">TOTAL:</td>
-                        <td class="fw-bold text-success" id="totalGeneral">S/ 0.00</td>
-                        <td></td>
-                    </tr>
-                </tfoot>
-            </table>
-        </div>
-    </div>
-
-    <div class="d-flex justify-content-end gap-2">
-        <a href="/pedidos" class="btn btn-outline-secondary">Cancelar</a>
-        <button type="submit" class="btn btn-naranja">
-            <i class="fa fa-save me-1"></i>Registrar Venta
-        </button>
-    </div>
-
+<!-- inputs ocultos de items (los genera JS al hacer submit) -->
+<div id="inputsOcultos"></div>
 </form>
 
 <script>
-const productos = {{ productos | tojson }};
+const PRODUCTOS = {{ productos | tojson }};
+let carrito = {};   // { id_producto: {nombre, precio, stock, cantidad} }
 
-function agregarFila() {
-    const tbody = document.getElementById('filas');
-    const idx   = tbody.rows.length;
-    const opts  = productos.map(p =>
-        `<option value="${p.id_producto}" data-precio="${p.precio}" data-stock="${p.stock}">
-            ${p.nombre} (Stock: ${p.stock}) — S/ ${parseFloat(p.precio).toFixed(2)}
-        </option>`
-    ).join('');
-
-    const tr = document.createElement('tr');
-    tr.innerHTML = `
-        <td>
-            <select name="id_producto[]" class="form-select form-select-sm sel-producto" onchange="actualizarPrecio(this)">
-                <option value="">— Selecciona —</option>
-                ${opts}
-            </select>
-        </td>
-        <td><input type="number" class="form-control form-control-sm precio-unit" readonly step="0.01" value="0.00"></td>
-        <td><input type="number" name="cantidad[]" class="form-control form-control-sm inp-cant" min="1" value="1" onchange="recalcular()"></td>
-        <td class="subtotal fw-semibold">S/ 0.00</td>
-        <td><button type="button" class="btn btn-sm btn-outline-danger" onclick="this.closest('tr').remove(); recalcular()"><i class="fa fa-trash"></i></button></td>
-    `;
-    tbody.appendChild(tr);
+// ── Render catálogo con búsqueda ──
+function renderCatalogo() {
+    const q = (document.getElementById('buscarProd').value || '').toLowerCase();
+    const grid = document.getElementById('gridProductos');
+    let html = '', n = 0;
+    for (const p of PRODUCTOS) {
+        const nombre = (p.nombre || '').toLowerCase();
+        const codigo = String(p.id_producto);
+        if (q && !nombre.includes(q) && !codigo.includes(q)) continue;
+        n++;
+        const sinStock = (p.stock || 0) <= 0;
+        html += `
+        <button type="button" class="pos-card ${sinStock ? 'sin-stock' : ''}"
+                ${sinStock ? 'disabled' : ''}
+                onclick="agregar(${p.id_producto})">
+            <div class="p-codigo">#${p.id_producto}</div>
+            <div class="p-nombre">${p.nombre}</div>
+            <div class="p-precio">S/ ${parseFloat(p.precio).toFixed(2)}</div>
+            <div class="p-stock">Stock: ${p.stock}</div>
+        </button>`;
+    }
+    grid.innerHTML = html || '<p class="text-muted p-3">Sin resultados</p>';
+    document.getElementById('contadorEncontrados').textContent = n;
 }
+document.getElementById('buscarProd').addEventListener('input', renderCatalogo);
+document.getElementById('buscarProd').addEventListener('keydown', e => {
+    if (e.key === 'Enter') {
+        e.preventDefault();
+        const first = document.querySelector('.pos-card:not(.sin-stock)');
+        if (first) first.click();
+    }
+});
 
-function actualizarPrecio(sel) {
-    const opt   = sel.options[sel.selectedIndex];
-    const precio = parseFloat(opt.dataset.precio || 0);
-    const fila  = sel.closest('tr');
-    fila.querySelector('.precio-unit').value = precio.toFixed(2);
-    const maxStock = parseInt(opt.dataset.stock || 1);
-    fila.querySelector('.inp-cant').max = maxStock;
-    recalcular();
+// ── Carrito en memoria ──
+function agregar(id) {
+    const p = PRODUCTOS.find(x => x.id_producto === id);
+    if (!p || p.stock <= 0) return;
+    if (!carrito[id]) carrito[id] = { nombre: p.nombre, precio: parseFloat(p.precio), stock: p.stock, cantidad: 1 };
+    else if (carrito[id].cantidad < carrito[id].stock) carrito[id].cantidad++;
+    renderTicket();
 }
+function cambiarCant(id, delta) {
+    if (!carrito[id]) return;
+    carrito[id].cantidad += delta;
+    if (carrito[id].cantidad <= 0) delete carrito[id];
+    if (carrito[id] && carrito[id].cantidad > carrito[id].stock) carrito[id].cantidad = carrito[id].stock;
+    renderTicket();
+}
+function setCant(id, valor) {
+    if (!carrito[id]) return;
+    let v = parseInt(valor) || 1;
+    if (v > carrito[id].stock) v = carrito[id].stock;
+    if (v < 1) v = 1;
+    carrito[id].cantidad = v;
+    renderTicket();
+}
+function quitarItem(id) { delete carrito[id]; renderTicket(); }
+function vaciarCarrito() { carrito = {}; renderTicket(); }
 
-function recalcular() {
-    let total = 0;
-    document.querySelectorAll('#filas tr').forEach(tr => {
-        const precio = parseFloat(tr.querySelector('.precio-unit').value) || 0;
-        const cant   = parseFloat(tr.querySelector('.inp-cant').value)    || 0;
-        const sub    = precio * cant;
-        tr.querySelector('.subtotal').textContent = 'S/ ' + sub.toFixed(2);
+function renderTicket() {
+    const cont = document.getElementById('listaItems');
+    const ids = Object.keys(carrito);
+    let html = '', total = 0;
+    for (const id of ids) {
+        const it = carrito[id];
+        const sub = it.precio * it.cantidad;
         total += sub;
-    });
-    document.getElementById('totalGeneral').textContent = 'S/ ' + total.toFixed(2);
+        html += `
+        <div class="pos-item">
+            <div>
+                <div class="it-nombre">${it.nombre}</div>
+                <div class="it-precio">S/ ${it.precio.toFixed(2)} c/u</div>
+            </div>
+            <div class="qty-box">
+                <button type="button" onclick="cambiarCant(${id}, -1)">−</button>
+                <input type="number" value="${it.cantidad}" min="1" max="${it.stock}"
+                       onchange="setCant(${id}, this.value)">
+                <button type="button" onclick="cambiarCant(${id}, 1)">+</button>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px">
+                <span class="it-subtotal">S/ ${sub.toFixed(2)}</span>
+                <button type="button" class="it-del" onclick="quitarItem(${id})"><i class="fa fa-trash"></i></button>
+            </div>
+        </div>`;
+    }
+    cont.innerHTML = html || `<div class="pos-vacio" id="vacioMsg">
+        <i class="fa fa-basket-shopping"></i> Agrega productos desde el catálogo</div>`;
+    document.getElementById('totalVenta').textContent = 'S/ ' + total.toFixed(2);
+    document.getElementById('totalBtn').textContent   = 'S/ ' + total.toFixed(2);
+    document.getElementById('btnCobrar').disabled = ids.length === 0;
 }
 
-// Agregar una fila por defecto al cargar
-agregarFila();
+// Selector de método (estilo activo)
+document.querySelectorAll('.pos-metodos .metodo').forEach(el => {
+    el.addEventListener('click', () => {
+        document.querySelectorAll('.pos-metodos .metodo').forEach(m => m.classList.remove('activo'));
+        el.classList.add('activo');
+    });
+});
+
+// ── Al cobrar: generar inputs ocultos id_producto[] / cantidad[] ──
+function validarVenta() {
+    const ids = Object.keys(carrito);
+    if (ids.length === 0) return false;
+    const cont = document.getElementById('inputsOcultos');
+    cont.innerHTML = '';
+    for (const id of ids) {
+        const it = carrito[id];
+        const inp1 = document.createElement('input');
+        inp1.type = 'hidden'; inp1.name = 'id_producto[]'; inp1.value = id;
+        const inp2 = document.createElement('input');
+        inp2.type = 'hidden'; inp2.name = 'cantidad[]';  inp2.value = it.cantidad;
+        cont.appendChild(inp1); cont.appendChild(inp2);
+    }
+    return true;
+}
+
+renderCatalogo();
 </script>
 {% endblock %}

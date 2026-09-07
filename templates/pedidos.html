@@ -32,10 +32,9 @@
                 <label class="form-label fw-semibold">Estado</label>
                 <select name="estado" class="form-select">
                     <option value="">Todos</option>
-                    <option value="pendiente" {% if request.args.get('estado') == 'pendiente' %}selected{% endif %}>Pendiente</option>
-                    <option value="confirmado" {% if request.args.get('estado') == 'confirmado' %}selected{% endif %}>Confirmado</option>
-                    <option value="enviado" {% if request.args.get('estado') == 'enviado' %}selected{% endif %}>Enviado</option>
-                    <option value="entregado" {% if request.args.get('estado') == 'entregado' %}selected{% endif %}>Entregado</option>
+                    {% for e in estados %}
+                    <option value="{{ e }}" {% if request.args.get('estado') == e %}selected{% endif %}>{{ e|capitalize }}</option>
+                    {% endfor %}
                 </select>
             </div>
             <div class="col-md-2">
@@ -112,12 +111,9 @@
                                 {% if session.rol in ['administrador', 'vendedor'] %}
                                 <form method="POST" action="/pedidos/{{ ped.id_pedido }}/estado" style="display:inline">
                                     <select name="estado" class="form-select form-select-sm" style="display:inline-block;width:auto">
-                                        <option value="pendiente" {% if ped.estado == 'pendiente' %}selected{% endif %}>Pendiente</option>
-                                        <option value="confirmado" {% if ped.estado == 'confirmado' %}selected{% endif %}>Confirmado</option>
-                                        <option value="preparando" {% if ped.estado == 'preparando' %}selected{% endif %}>Preparando</option>
-                                        <option value="listo" {% if ped.estado == 'listo' %}selected{% endif %}>Listo</option>
-                                        <option value="entregado" {% if ped.estado == 'entregado' %}selected{% endif %}>Entregado</option>
-                                        <option value="cancelado" {% if ped.estado == 'cancelado' %}selected{% endif %}>Cancelado</option>
+                                        {% for e in estados %}
+                                        <option value="{{ e }}" {% if ped.estado == e %}selected{% endif %}>{{ e|capitalize }}</option>
+                                        {% endfor %}
                                     </select>
                                     <button class="btn btn-sm btn-outline-warning" type="submit" title="Actualizar"><i class="fa fa-sync"></i></button>
                                 </form>

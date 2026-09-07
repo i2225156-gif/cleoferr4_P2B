@@ -137,10 +137,18 @@ class Producto(db.Model):
 
 
 # ── Decorators ──────────────────────────────────────────────
+# Rutas de cliente (públicas/catálogo) que deben redirigir a /login_cliente,
+# no al login administrativo
+_RUTAS_CLIENTE = ('/carrito', '/mis_pedidos', '/procesar_pago', '/carrito/confirmar')
+
+
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if "usuario_id" not in session:
+            # Si la petición viene de una ruta de cliente, mandar a login de clientes
+            if any(request.path.startswith(r) for r in _RUTAS_CLIENTE):
+                return redirect(url_for("login_cliente"))
             return redirect(url_for("login"))
         return f(*args, **kwargs)
     return decorated_function
@@ -1131,7 +1139,12 @@ def eliminar_proveedor_post(proveedor_id):
 def pedidos():
     conn = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
-    PASOS = ['pendiente', 'procesando', 'enviado', 'entregado']
+    # Estados válidos leídos de la tabla estado_venta (nunca desincronizados del HTML)
+    cursor.execute("""
+        SELECT nombre FROM estado_venta WHERE activo = TRUE ORDER BY orden
+    """)
+    lista_estados = [r['nombre'] for r in cursor.fetchall()]
+    PASOS = [e for e in lista_estados if e != 'cancelado']
     try:
         # Consulta 1 (Tienda): ventas + total, sin joins cross-BD
         cursor.execute("""
@@ -1153,7 +1166,6 @@ def pedidos():
             LIMIT 200
         """)
         pedidos_raw = cursor.fetchall()
-        conn.close()
 
         # Consulta 2 (Auth): clientes y usuarios
         conn_a   = get_connection_auth()
@@ -1199,7 +1211,7 @@ def pedidos():
         pedidos = []
     finally:
         conn.close()
-    return render_template('pedidos.html', pedidos=pedidos)
+    return render_template('pedidos.html', pedidos=pedidos, estados=lista_estados)
 
 @app.route('/ventas/nueva', methods=['GET'])
 @login_required
@@ -1237,6 +1249,9 @@ def venta_nueva_form():
 def venta_nueva_guardar():
     id_cliente   = request.form.get('id_cliente') or None
     tipo_venta   = request.form.get('tipo_venta', 'local')
+    metodo_pago  = request.form.get('metodo_pago', 'efectivo')
+    metodo_db    = 'yape_plin' if metodo_pago == 'yape' else (
+                   'tarjeta'   if metodo_pago == 'tarjeta' else 'efectivo')
     ids_producto = request.form.getlist('id_producto[]')
     cantidades   = request.form.getlist('cantidad[]')
 
@@ -1281,8 +1296,12 @@ def venta_nueva_guardar():
                 UPDATE producto SET stock = stock - %s WHERE id_producto = %s
             """, (cant, id_prod))
 
-        # Registrar el ingreso en caja para ventas locales
+        # Registrar el pago y el ingreso en caja para ventas locales
         if tipo_venta == 'local' and caja_activa:
+            cursor.execute("""
+                INSERT INTO pago (id_venta, id_tipo_pago, id_caja, estado)
+                VALUES (%s, (SELECT id_tipo_pago FROM tipo_pago WHERE nombre = %s), %s, 'confirmado')
+            """, (id_venta, metodo_db, caja_activa['id_caja']))
             cursor.execute("""
                 INSERT INTO movimiento_caja (id_caja, tipo, monto, concepto, id_usuario)
                 SELECT %s, 'ingreso',
@@ -2264,7 +2283,11 @@ def pedido_aceptado():
 @escritura_required
 def pedido_cambiar_estado(id):
     """Vendedor/Admin cambia el estado (fase) de un pedido."""
-    estados_validos = ('pendiente', 'procesando', 'enviado', 'entregado', 'cancelado')
+    conn_v   = get_connection_tienda()
+    cursor_v = conn_v.cursor(dictionary=True)
+    cursor_v.execute("SELECT nombre FROM estado_venta WHERE activo = TRUE ORDER BY orden")
+    estados_validos = tuple(r['nombre'] for r in cursor_v.fetchall())
+    conn_v.close()
     nuevo_estado = request.form.get('estado', 'pendiente')
     if nuevo_estado not in estados_validos:
         flash('Estado no válido.', 'danger')
@@ -2307,6 +2330,30 @@ def carrito_confirmar_v2():
         return {'ok': False, 'error': 'Carrito vacío'}
     if session.get('rol') != 'cliente':
         return {'ok': False, 'error': 'Solo clientes pueden confirmar pedidos'}
+
+    # Validar que todos los productos del carrito existan y estén activos
+    # (el carrito vive en localStorage del navegador y puede traer IDs obsoletos
+    #  si el catálogo cambió desde que se agregaron los ítems)
+    conn_val   = get_connection_tienda()
+    cursor_val = conn_val.cursor(dictionary=True)
+    ids_items  = {int(it.get('id_producto') or it.get('id') or 0) for it in items}
+    cursor_val.execute(
+        "SELECT id_producto FROM producto WHERE id_producto = ANY(%s) AND activo = TRUE",
+        (list(ids_items),))
+    ids_validos = {r['id_producto'] for r in cursor_val.fetchall()}
+    conn_val.close()
+
+    ids_faltantes = ids_items - ids_validos
+    if ids_faltantes:
+        nombres_bad = []
+        for it in items:
+            pid = int(it.get('id_producto') or it.get('id') or 0)
+            if pid in ids_faltantes:
+                nombres_bad.append(it.get('nombre') or f'producto #{pid}')
+        return {'ok': False, 'error': (
+            'Este producto ya no está disponible: ' + ', '.join(nombres_bad)
+            + '. Eliminalo del carrito para continuar.'
+        )}
 
     tipo_boleta  = 'electronica' if tipo_comprobante == 'boleta_electronica' else 'simple'
     tipo_comp_db = 'factura' if (ruc and len(ruc) == 11 and ruc.startswith('20')) else 'boleta'
