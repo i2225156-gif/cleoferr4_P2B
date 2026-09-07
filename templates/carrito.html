@@ -1,0 +1,751 @@
+{% extends 'base.html' %}
+{% block titulito %}Carrito – Cleoferr{% endblock %}
+{% block contenido %}
+
+<style>
+.carrito-header {
+    background: linear-gradient(135deg, var(--gris-oscuro), var(--naranja-oscuro));
+    color: white; padding: 20px 28px; border-radius: 12px;
+    margin-bottom: 24px; display: flex;
+    align-items: center; justify-content: space-between;
+}
+.carrito-header h2 { margin: 0; font-weight: 700; font-size: 1.5rem; }
+.tabla-carrito { background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 16px rgba(0,0,0,0.08); }
+.tabla-carrito thead { background: var(--gris-oscuro); color: white; }
+.tabla-carrito thead th { padding: 14px 16px; font-size: 0.85rem; text-transform: uppercase; border: none; }
+.tabla-carrito tbody td { padding: 14px 16px; vertical-align: middle; border-color: #f0f0f0; }
+.tabla-carrito tbody tr:hover { background: rgba(232,88,10,0.04); }
+.qty-control { display: flex; align-items: center; gap: 8px; }
+.qty-btn {
+    width: 30px; height: 30px; border-radius: 6px;
+    border: 2px solid var(--naranja); background: white;
+    color: var(--naranja); font-weight: 800; font-size: 1rem;
+    cursor: pointer; display: flex; align-items: center; justify-content: center;
+    transition: all 0.15s; line-height: 1;
+}
+.qty-btn:hover { background: var(--naranja); color: white; }
+.qty-num { width: 36px; text-align: center; font-weight: 700; font-size: 1rem; color: var(--gris-oscuro); }
+.btn-eliminar {
+    background: transparent; border: 2px solid #dc3545;
+    color: #dc3545; border-radius: 6px; padding: 5px 10px;
+    cursor: pointer; transition: all 0.15s; font-size: 0.85rem;
+}
+.btn-eliminar:hover { background: #dc3545; color: white; }
+.resumen-card {
+    background: white; border-radius: 12px;
+    box-shadow: 0 2px 16px rgba(0,0,0,0.08); padding: 24px;
+    position: sticky; top: 80px;
+}
+.resumen-card h5 { font-weight: 800; color: var(--gris-oscuro); border-bottom: 2px solid var(--naranja); padding-bottom: 12px; margin-bottom: 16px; }
+.resumen-linea { display: flex; justify-content: space-between; margin-bottom: 10px; font-size: 0.9rem; color: #555; }
+.resumen-total { display: flex; justify-content: space-between; font-size: 1.2rem; font-weight: 800; color: var(--naranja); margin-top: 12px; padding-top: 12px; border-top: 2px solid #f0f0f0; }
+.btn-pedir {
+    background: var(--naranja); color: white; border: none;
+    border-radius: 8px; padding: 13px; width: 100%;
+    font-weight: 800; font-size: 1rem; cursor: pointer; margin-top: 14px; transition: all 0.2s;
+}
+.btn-pedir:hover { background: var(--naranja-oscuro); transform: translateY(-1px); box-shadow: 0 4px 16px rgba(232,88,10,0.35); }
+.carrito-vacio { text-align: center; padding: 80px 20px; color: #bbb; }
+.carrito-vacio i { font-size: 4rem; margin-bottom: 16px; color: #ddd; display: block; }
+.carrito-vacio h4 { color: #aaa; font-weight: 700; }
+.carrito-vacio a { color: var(--naranja); font-weight: 700; }
+/* Modal pasos */
+.paso-wizard { display: none; }
+.paso-wizard.activo { display: block; }
+.metodo-btn {
+    border: 2px solid #ddd; border-radius: 12px; padding: 18px;
+    cursor: pointer; text-align: center; transition: all 0.2s;
+    background: white;
+}
+.metodo-btn:hover, .metodo-btn.seleccionado {
+    border-color: var(--naranja); background: rgba(232,88,10,0.05);
+}
+.metodo-btn i { font-size: 2rem; display: block; margin-bottom: 8px; }
+.metodo-btn.seleccionado i { color: var(--naranja); }
+.comprobante-opt {
+    border: 2px solid #ddd; border-radius: 10px; padding: 14px 18px;
+    cursor: pointer; transition: all 0.2s; background: white; margin-bottom: 10px;
+    display: flex; align-items: center; gap: 12px;
+}
+.comprobante-opt:hover, .comprobante-opt.seleccionado {
+    border-color: var(--naranja); background: rgba(232,88,10,0.05);
+}
+.comprobante-opt.seleccionado { font-weight: 700; }
+.wizard-steps {
+    display: flex; justify-content: center; gap: 0; margin-bottom: 20px;
+}
+.wstep {
+    display: flex; align-items: center; gap: 0;
+}
+.wstep-dot {
+    width: 32px; height: 32px; border-radius: 50%;
+    background: #ddd; color: #999; font-weight: 800; font-size: 0.85rem;
+    display: flex; align-items: center; justify-content: center;
+}
+.wstep-dot.activo { background: var(--naranja); color: white; }
+.wstep-dot.hecho { background: #28a745; color: white; }
+.wstep-line { width: 50px; height: 3px; background: #ddd; }
+.wstep-line.hecha { background: #28a745; }
+.wstep-label { font-size: 0.7rem; text-align: center; margin-top: 4px; color: #888; white-space: nowrap; }
+.wstep-label.activo { color: var(--naranja); font-weight: 700; }
+.qr-placeholder {
+    width: 180px; height: 180px; background: #f5f5f5;
+    border-radius: 12px; margin: 0 auto;
+    display: flex; align-items: center; justify-content: center;
+    flex-direction: column; border: 2px dashed #ccc;
+}
+</style>
+
+<div class="carrito-header">
+    <div>
+        <h2><i class="fa fa-shopping-cart me-2"></i>Mi Carrito</h2>
+        <p style="margin:4px 0 0;opacity:0.8;font-size:0.9rem">Revisa tus productos antes de confirmar</p>
+    </div>
+    <a href="/catalogo" class="btn btn-outline-light"><i class="fa fa-arrow-left me-1"></i>Seguir comprando</a>
+</div>
+
+<div id="vistaVacia" class="carrito-vacio" style="display:none">
+    <i class="fa fa-shopping-cart"></i>
+    <h4>Tu carrito está vacío</h4>
+    <p>Agrega productos desde el <a href="/catalogo">catálogo</a></p>
+</div>
+
+<div id="vistaCarrito" style="display:none">
+    <div class="row g-4">
+        <div class="col-lg-8">
+            <div class="tabla-carrito">
+                <table class="table mb-0">
+                    <thead>
+                        <tr>
+                            <th>Producto</th>
+                            <th>Precio unit.</th>
+                            <th>Cantidad</th>
+                            <th>Subtotal</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody id="tbodyCarrito"></tbody>
+                </table>
+            </div>
+            <div class="d-flex gap-2 mt-3">
+                <button class="btn btn-outline-danger" onclick="vaciarCarrito()">
+                    <i class="fa fa-trash me-1"></i>Vaciar carrito
+                </button>
+                <a href="/catalogo" class="btn btn-outline-secondary">
+                    <i class="fa fa-plus me-1"></i>Agregar más
+                </a>
+            </div>
+        </div>
+        <div class="col-lg-4">
+            <div class="resumen-card">
+                <h5><i class="fa fa-receipt me-2"></i>Resumen del pedido</h5>
+                <div class="resumen-linea">
+                    <span>Subtotal (<span id="totalItems">0</span> items)</span>
+                    <span>S/ <span id="subtotalVal">0.00</span></span>
+                </div>
+                <div class="resumen-linea">
+                    <span>Recojo en tienda</span>
+                    <span class="text-success fw-semibold">Gratis</span>
+                </div>
+                <div class="resumen-total">
+                    <span>TOTAL</span>
+                    <span>S/ <span id="totalVal">0.00</span></span>
+                </div>
+                <button class="btn-pedir" onclick="abrirModalPago()">
+                    <i class="fa fa-shopping-bag me-2"></i>Realizar pedido
+                </button>
+                <p style="font-size:0.75rem;color:#aaa;text-align:center;margin-top:10px">
+                    <i class="fa fa-lock me-1"></i>Compra segura · Cleoferr
+                </p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ===== MODAL WIZARD PAGO ===== -->
+<div class="modal fade" id="modalPago" tabindex="-1" data-bs-backdrop="static">
+    <div class="modal-dialog modal-dialog-centered modal-lg">
+        <div class="modal-content border-0" style="border-radius:16px;overflow:hidden">
+            <div class="modal-header" style="background:var(--naranja);color:white;border:none;padding:18px 24px">
+                <h5 class="modal-title fw-bold" id="modalPagoTitulo">
+                    <i class="fa fa-credit-card me-2"></i>Completar pedido
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body p-4">
+                <!-- Steps indicator -->
+                <div class="wizard-steps mb-3">
+                    <div class="wstep">
+                        <div>
+                            <div class="wstep-dot activo" id="dot1">1</div>
+                            <div class="wstep-label activo" id="lbl1">Pago</div>
+                        </div>
+                        <div class="wstep-line" id="line1"></div>
+                    </div>
+                    <div class="wstep">
+                        <div>
+                            <div class="wstep-dot" id="dot2">2</div>
+                            <div class="wstep-label" id="lbl2">Comprobante</div>
+                        </div>
+                        <div class="wstep-line" id="line2"></div>
+                    </div>
+                    <div class="wstep">
+                        <div>
+                            <div class="wstep-dot" id="dot3">3</div>
+                            <div class="wstep-label" id="lbl3">Confirmar</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- PASO 1: Método de pago -->
+                <div class="paso-wizard activo" id="paso1">
+                    <h6 class="fw-bold mb-3"><i class="fa fa-wallet me-2" style="color:var(--azul)"></i>Selecciona tu método de pago</h6>
+
+                    <div class="row g-3 mb-3">
+                        <div class="col-6">
+                            <div class="metodo-btn" id="btnTarjeta" onclick="seleccionarMetodo('tarjeta')" style="cursor:pointer;border:2px solid #e0e0e0;border-radius:12px;padding:16px;text-align:center;transition:all 0.2s;background:white">
+                                <div style="display:flex;justify-content:center;gap:6px;margin-bottom:8px">
+                                    <svg width="36" height="24" viewBox="0 0 36 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="24" rx="4" fill="#1A1F71"/><circle cx="14" cy="12" r="7" fill="#EB001B"/><circle cx="22" cy="12" r="7" fill="#F79E1B"/><path d="M18 6.8C19.7 8 20.8 9.9 20.8 12s-1.1 4-2.8 5.2C16.3 16 15.2 14.1 15.2 12s1.1-4 2.8-5.2z" fill="#FF5F00"/></svg>
+                                    <svg width="36" height="24" viewBox="0 0 36 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="36" height="24" rx="4" fill="#fff" stroke="#e0e0e0"/><text x="5" y="16" font-family="Arial" font-size="9" font-weight="bold" fill="#0066B2">VISA</text></svg>
+                                </div>
+                                <strong style="font-size:0.9rem">Tarjeta</strong>
+                                <small class="d-block text-muted" style="font-size:0.75rem">Débito / Crédito</small>
+                            </div>
+                        </div>
+                        <div class="col-6">
+                            <div class="metodo-btn" id="btnYape" onclick="seleccionarMetodo('yape')" style="cursor:pointer;border:2px solid #e0e0e0;border-radius:12px;padding:16px;text-align:center;transition:all 0.2s;background:white">
+                                <div style="display:flex;justify-content:center;gap:8px;margin-bottom:8px;align-items:center">
+                                    <span style="background:#7b2d8b;color:white;font-size:0.7rem;font-weight:900;padding:3px 8px;border-radius:6px;letter-spacing:0.5px">YAPE</span>
+                                    <span style="background:#1a8cdb;color:white;font-size:0.7rem;font-weight:900;padding:3px 8px;border-radius:6px;letter-spacing:0.5px">PLIN</span>
+                                </div>
+                                <strong style="font-size:0.9rem">Yape / Plin</strong>
+                                <small class="d-block text-muted" style="font-size:0.75rem">Escanea el QR</small>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Formulario tarjeta -->
+                    <div id="formTarjeta" style="display:none">
+                        <div class="p-3 rounded-3 mb-3" style="background:#f8f9ff;border:2px solid #e0e7ff">
+                            <!-- Card visual preview -->
+                            <div style="background:linear-gradient(135deg,#1a1a2e,#4682B4);border-radius:12px;padding:18px 20px;margin-bottom:16px;color:white;font-family:monospace;position:relative;min-height:90px">
+                                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+                                    <span style="font-size:0.7rem;opacity:0.7;font-family:sans-serif;text-transform:uppercase;letter-spacing:1px">Tarjeta de pago</span>
+                                    <svg width="44" height="30" viewBox="0 0 36 24" fill="none"><circle cx="14" cy="12" r="7" fill="#EB001B" opacity="0.9"/><circle cx="22" cy="12" r="7" fill="#F79E1B" opacity="0.9"/><path d="M18 6.8C19.7 8 20.8 9.9 20.8 12s-1.1 4-2.8 5.2C16.3 16 15.2 14.1 15.2 12s1.1-4 2.8-5.2z" fill="#FF5F00"/></svg>
+                                </div>
+                                <div style="font-size:1.1rem;letter-spacing:4px;margin-bottom:8px" id="previewNum">•••• •••• •••• ••••</div>
+                                <div style="display:flex;gap:24px;font-size:0.72rem;opacity:0.8">
+                                    <span id="previewNom" style="text-transform:uppercase">NOMBRE APELLIDO</span>
+                                    <span id="previewVenc">MM/AA</span>
+                                </div>
+                            </div>
+                            <div class="mb-2">
+                                <label class="form-label fw-semibold" style="font-size:0.85rem">Número de tarjeta</label>
+                                <input type="text" id="numTarjeta" class="form-control" placeholder="0000 0000 0000 0000"
+                                       maxlength="19" oninput="formatCard(this)">
+                            </div>
+                            <div class="mb-2">
+                                <label class="form-label fw-semibold" style="font-size:0.85rem">Nombre en la tarjeta</label>
+                                <input type="text" id="nomTarjeta" class="form-control" placeholder="NOMBRE APELLIDO"
+                                       oninput="document.getElementById('previewNom').textContent=this.value.toUpperCase()||'NOMBRE APELLIDO'">
+                            </div>
+                            <div class="row g-2">
+                                <div class="col-6">
+                                    <label class="form-label fw-semibold" style="font-size:0.85rem">Vencimiento</label>
+                                    <input type="text" id="vencTarjeta" class="form-control" placeholder="MM/AA"
+                                           maxlength="5" oninput="formatExpiry(this)">
+                                </div>
+                                <div class="col-6">
+                                    <label class="form-label fw-semibold" style="font-size:0.85rem">CVV</label>
+                                    <input type="password" id="cvvTarjeta" class="form-control" placeholder="•••" maxlength="4">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- QR Yape/Plin -->
+                    <div id="formYape" style="display:none">
+                        <div class="text-center p-3 rounded-3" style="background:linear-gradient(135deg,#fdf3ff,#f0f7ff);border:2px solid #e9d5f5">
+                            <div style="display:flex;justify-content:center;gap:8px;margin-bottom:12px">
+                                <span style="background:#7b2d8b;color:white;font-size:0.82rem;font-weight:900;padding:4px 14px;border-radius:20px">YAPE</span>
+                                <span style="background:#1a8cdb;color:white;font-size:0.82rem;font-weight:900;padding:4px 14px;border-radius:20px">PLIN</span>
+                            </div>
+                            <div class="qr-placeholder mb-3" style="display:inline-block;background:white;padding:12px;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,0.1)">
+                                <svg width="150" height="150" viewBox="0 0 140 140" xmlns="http://www.w3.org/2000/svg">
+                                    <rect width="140" height="140" fill="white"/>
+                                    <rect x="10" y="10" width="40" height="40" rx="4" fill="#333"/><rect x="16" y="16" width="28" height="28" rx="2" fill="white"/><rect x="20" y="20" width="20" height="20" rx="1" fill="#333"/>
+                                    <rect x="90" y="10" width="40" height="40" rx="4" fill="#333"/><rect x="96" y="16" width="28" height="28" rx="2" fill="white"/><rect x="100" y="20" width="20" height="20" rx="1" fill="#333"/>
+                                    <rect x="10" y="90" width="40" height="40" rx="4" fill="#333"/><rect x="16" y="96" width="28" height="28" rx="2" fill="white"/><rect x="20" y="100" width="20" height="20" rx="1" fill="#333"/>
+                                    <rect x="55" y="10" width="8" height="8" fill="#333"/><rect x="67" y="10" width="8" height="8" fill="#333"/>
+                                    <rect x="55" y="22" width="8" height="8" fill="#333"/><rect x="67" y="22" width="8" height="8" fill="#333"/>
+                                    <rect x="55" y="34" width="8" height="8" fill="#333"/>
+                                    <rect x="55" y="55" width="8" height="8" fill="#7b2d8b"/><rect x="67" y="55" width="8" height="8" fill="#7b2d8b"/>
+                                    <rect x="79" y="55" width="8" height="8" fill="#7b2d8b"/><rect x="55" y="67" width="8" height="8" fill="#7b2d8b"/>
+                                    <rect x="67" y="67" width="8" height="8" fill="#7b2d8b"/>
+                                    <rect x="90" y="55" width="8" height="8" fill="#333"/><rect x="102" y="55" width="8" height="8" fill="#333"/>
+                                    <rect x="114" y="55" width="8" height="8" fill="#333"/>
+                                    <rect x="55" y="90" width="8" height="8" fill="#333"/><rect x="67" y="90" width="8" height="8" fill="#333"/>
+                                    <rect x="79" y="90" width="8" height="8" fill="#333"/><rect x="55" y="102" width="8" height="8" fill="#333"/>
+                                    <rect x="90" y="90" width="8" height="8" fill="#333"/><rect x="102" y="90" width="8" height="8" fill="#333"/>
+                                    <rect x="114" y="90" width="8" height="8" fill="#333"/>
+                                </svg>
+                            </div>
+                            <p class="fw-bold mb-1" style="color:#7b2d8b;font-size:0.95rem">Escanea con Yape o Plin</p>
+                            <p class="mb-2" style="font-size:0.85rem;color:#555">Monto a pagar: <strong class="fw-bold" style="color:#1a1a2e;font-size:1.1rem" id="montoYape">S/ 0.00</strong></p>
+                            <label class="form-label fw-semibold" style="font-size:0.82rem;color:#666">N° de operación (requerido para confirmar):</label>
+                            <input type="text" id="numOperacion" class="form-control" placeholder="Ingresa el número de operación"
+                                   style="max-width:300px;margin:0 auto;text-align:center">
+                        </div>
+                    </div>
+
+                    <div class="d-flex justify-content-end mt-3">
+                        <button class="btn btn-naranja px-4" onclick="irPaso2()" id="btnSiguiente1" disabled>
+                            Siguiente <i class="fa fa-arrow-right ms-1"></i>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- PASO 2: Comprobante -->
+                <div class="paso-wizard" id="paso2">
+                    <h6 class="fw-bold mb-3"><i class="fa fa-file-invoice me-2"></i>Selecciona tu comprobante de pago</h6>
+
+                    <div class="comprobante-opt" id="optBoletaE" onclick="seleccionarComprobante('boleta_electronica')">
+                        <i class="fa fa-file-invoice fa-lg" style="color:#0066cc"></i>
+                        <div>
+                            <strong>Boleta Electrónica</strong>
+                            <div style="font-size:0.8rem;color:#777">Se envía por correo electrónico con DNI (opcional)</div>
+                        </div>
+                    </div>
+
+                    <div class="comprobante-opt" id="optFactura" onclick="seleccionarComprobante('factura')">
+                        <i class="fa fa-building fa-lg" style="color:#28a745"></i>
+                        <div>
+                            <strong>Factura</strong>
+                            <div style="font-size:0.8rem;color:#777">Para empresas – requiere RUC obligatorio</div>
+                        </div>
+                    </div>
+
+                    <!-- DNI opcional para boleta electrónica -->
+                    <div id="campoDni" style="display:none" class="mt-2 p-3 rounded-3 bg-light">
+                        <label class="form-label fw-semibold" style="font-size:0.85rem">DNI (opcional)</label>
+                        <input type="text" id="inputDni" class="form-control" placeholder="12345678" maxlength="8" inputmode="numeric">
+                        <div id="dniFeedback" style="font-size:0.75rem;color:#888;margin-top:4px">
+                            <i class="fa fa-info-circle me-1"></i>Ingresa tu DNI para que la boleta sea emitida a tu nombre
+                        </div>
+                        <div id="dniDatos" style="display:none;margin-top:8px;padding:10px;background:#e8f5e9;border-radius:8px;border-left:4px solid #28a745">
+                            <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+                                <i class="fa fa-check-circle" style="color:#28a745"></i>
+                                <span style="font-size:0.8rem;color:#555;font-weight:600">DNI VÁLIDO – DATOS RENIEC</span>
+                            </div>
+                            <div id="dniNombreCompleto" style="font-weight:800;color:#1b5e20;font-size:1rem"></div>
+                        </div>
+                        <div id="dniError" style="display:none;margin-top:6px;padding:6px 10px;background:#fff3f3;border-radius:6px;border-left:4px solid #dc3545;font-size:0.82rem;color:#842029"></div>
+                    </div>
+
+                    <!-- RUC obligatorio para factura -->
+                    <div id="campoRuc" style="display:none" class="mt-2 p-3 rounded-3 bg-light">
+                        <label class="form-label fw-semibold" style="font-size:0.85rem">RUC <span class="text-danger">*</span> (obligatorio para factura)</label>
+                        <input type="text" id="inputRuc" class="form-control" placeholder="20XXXXXXXXX" maxlength="11" inputmode="numeric">
+                        <div id="rucFeedback" style="font-size:0.75rem;color:#888;margin-top:4px">
+                            <i class="fa fa-info-circle me-1"></i>Los datos de la empresa aparecerán automáticamente
+                        </div>
+                        <div id="rucDatos" style="display:none;margin-top:10px;padding:12px;background:#e8f5e9;border-radius:8px;border-left:4px solid #28a745">
+                            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+                                <i class="fa fa-check-circle" style="color:#28a745"></i>
+                                <span style="font-size:0.8rem;color:#555;font-weight:600">RUC VÁLIDO – DATOS SUNAT</span>
+                            </div>
+                            <div id="rucRazonSocial" style="font-weight:800;color:#1b5e20;font-size:1rem;margin-bottom:4px"></div>
+                            <div id="rucTipo" style="font-size:0.78rem;color:#2e7d32"></div>
+                            <div id="rucDireccion" style="font-size:0.78rem;color:#555;margin-top:4px"></div>
+                            <div id="rucEstado" style="font-size:0.78rem;margin-top:2px"></div>
+                        </div>
+                        <div id="rucError" style="display:none;margin-top:8px;padding:8px;background:#fff3f3;border-radius:6px;border-left:4px solid #dc3545;font-size:0.82rem;color:#842029"></div>
+                    </div>
+
+                    <div class="d-flex justify-content-between mt-4">
+                        <button class="btn btn-outline-secondary px-4" onclick="irPaso(1)">
+                            <i class="fa fa-arrow-left me-1"></i> Atrás
+                        </button>
+                        <button class="btn btn-naranja px-4" onclick="irPaso3()" id="btnSiguiente2" disabled>
+                            Siguiente <i class="fa fa-arrow-right ms-1"></i>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- PASO 3: Confirmar -->
+                <div class="paso-wizard" id="paso3">
+                    <h6 class="fw-bold mb-3"><i class="fa fa-check-circle me-2 text-success"></i>Confirma tu pedido</h6>
+                    <div id="resumenConfirmar" class="rounded-3 p-3 mb-3" style="background:#f9f9f9;font-size:0.88rem"></div>
+                    <div class="d-flex justify-content-between mt-3">
+                        <button class="btn btn-outline-secondary px-4" onclick="irPaso(2)">
+                            <i class="fa fa-arrow-left me-1"></i> Atrás
+                        </button>
+                        <button class="btn btn-success px-4 fw-bold" onclick="confirmarPedidoFinal()">
+                            <i class="fa fa-check me-1"></i> Confirmar pedido
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+// ===== Carrito =====
+function getCarrito() {
+    return JSON.parse(localStorage.getItem('carrito_cleoferr') || '[]');
+}
+function saveCarrito(c) {
+    localStorage.setItem('carrito_cleoferr', JSON.stringify(c));
+    renderCarrito();
+}
+
+function renderCarrito() {
+    const carrito = getCarrito();
+    const tbody   = document.getElementById('tbodyCarrito');
+
+    if (carrito.length === 0) {
+        document.getElementById('vistaVacia').style.display = 'block';
+        document.getElementById('vistaCarrito').style.display = 'none';
+        return;
+    }
+    document.getElementById('vistaVacia').style.display = 'none';
+    document.getElementById('vistaCarrito').style.display = 'block';
+
+    tbody.innerHTML = '';
+    let subtotal = 0, totalItems = 0;
+
+    carrito.forEach((item, idx) => {
+        const sub = item.precio * item.cantidad;
+        subtotal   += sub;
+        totalItems += item.cantidad;
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+            <td>
+                <div class="fw-semibold" style="color:var(--gris-oscuro)">${item.nombre}</div>
+                <small class="text-muted">#${item.id}</small>
+            </td>
+            <td class="fw-bold" style="color:var(--naranja)">S/ ${item.precio.toFixed(2)}</td>
+            <td>
+                <div class="qty-control">
+                    <button class="qty-btn" onclick="cambiarCantidad(${idx}, -1)">−</button>
+                    <span class="qty-num">${item.cantidad}</span>
+                    <button class="qty-btn" onclick="cambiarCantidad(${idx}, +1)">+</button>
+                </div>
+            </td>
+            <td class="fw-bold">S/ ${sub.toFixed(2)}</td>
+            <td>
+                <button class="btn-eliminar" onclick="eliminarItem(${idx})">
+                    <i class="fa fa-trash"></i>
+                </button>
+            </td>`;
+        tbody.appendChild(tr);
+    });
+
+    document.getElementById('totalItems').textContent  = totalItems;
+    document.getElementById('subtotalVal').textContent = subtotal.toFixed(2);
+    document.getElementById('totalVal').textContent    = subtotal.toFixed(2);
+    if (document.getElementById('montoYape'))
+        document.getElementById('montoYape').textContent = 'S/ ' + subtotal.toFixed(2);
+}
+
+function cambiarCantidad(idx, delta) {
+    const carrito = getCarrito();
+    carrito[idx].cantidad += delta;
+    if (carrito[idx].cantidad <= 0) carrito.splice(idx, 1);
+    saveCarrito(carrito);
+}
+function eliminarItem(idx) {
+    const carrito = getCarrito();
+    carrito.splice(idx, 1);
+    saveCarrito(carrito);
+}
+function vaciarCarrito() {
+    if (!confirm('¿Vaciar el carrito?')) return;
+    localStorage.removeItem('carrito_cleoferr');
+    window.location.href = '/catalogo';
+}
+
+// ===== Wizard Pago =====
+let metodoPago = null, tipoComprobante = null, razonSocialActual = '', nombreCompletoDni = '';
+
+function abrirModalPago() {
+    const carrito = getCarrito();
+    if (carrito.length === 0) return;
+    // Verificar si está logueado; si no, redirigir al login
+    {% if not session.usuario_id or session.rol != 'cliente' %}
+    if (confirm('Para realizar tu pedido debes iniciar sesión o crear una cuenta. ¿Deseas ir al login?')) {
+        window.location.href = '/login_cliente';
+    }
+    return;
+    {% endif %}
+    metodoPago = null; tipoComprobante = null;
+    irPaso(1);
+    new bootstrap.Modal(document.getElementById('modalPago')).show();
+}
+
+function irPaso(n) {
+    document.querySelectorAll('.paso-wizard').forEach(p => p.classList.remove('activo'));
+    document.getElementById('paso' + n).classList.add('activo');
+    // actualizar dots
+    for (let i = 1; i <= 3; i++) {
+        const dot = document.getElementById('dot' + i);
+        const lbl = document.getElementById('lbl' + i);
+        dot.className = 'wstep-dot';
+        lbl.className = 'wstep-label';
+        if (i < n) { dot.classList.add('hecho'); dot.innerHTML = '<i class="fa fa-check" style="font-size:0.7rem"></i>'; }
+        else if (i === n) { dot.classList.add('activo'); lbl.classList.add('activo'); dot.textContent = i; }
+        else dot.textContent = i;
+    }
+    for (let i = 1; i <= 2; i++) {
+        const line = document.getElementById('line' + i);
+        if (line) line.className = 'wstep-line' + (i < n ? ' hecha' : '');
+    }
+}
+
+function seleccionarMetodo(m) {
+    metodoPago = m;
+    document.getElementById('btnTarjeta').classList.toggle('seleccionado', m === 'tarjeta');
+    document.getElementById('btnYape').classList.toggle('seleccionado', m === 'yape');
+    document.getElementById('formTarjeta').style.display = m === 'tarjeta' ? 'block' : 'none';
+    document.getElementById('formYape').style.display = m === 'yape' ? 'block' : 'none';
+    document.getElementById('btnSiguiente1').disabled = false;
+    // actualizar monto yape
+    const total = getCarrito().reduce((s, i) => s + i.precio * i.cantidad, 0);
+    document.getElementById('montoYape').textContent = 'S/ ' + total.toFixed(2);
+}
+
+function irPaso2() {
+    if (!metodoPago) return;
+    if (metodoPago === 'tarjeta') {
+        const num = document.getElementById('numTarjeta').value.replace(/\s/g,'');
+        const nom = document.getElementById('nomTarjeta').value.trim();
+        const venc = document.getElementById('vencTarjeta').value;
+        const cvv = document.getElementById('cvvTarjeta').value;
+        if (num.length < 16 || !nom || venc.length < 5 || cvv.length < 3) {
+            alert('Por favor completa todos los datos de la tarjeta.'); return;
+        }
+    }
+    irPaso(2);
+}
+
+function seleccionarComprobante(tipo) {
+    tipoComprobante = tipo;
+    document.getElementById('optBoletaE').classList.toggle('seleccionado', tipo === 'boleta_electronica');
+    document.getElementById('optFactura').classList.toggle('seleccionado', tipo === 'factura');
+    document.getElementById('campoDni').style.display = tipo === 'boleta_electronica' ? 'block' : 'none';
+    document.getElementById('campoRuc').style.display = tipo === 'factura' ? 'block' : 'none';
+    document.getElementById('btnSiguiente2').disabled = false;
+    // Limpiar campos al cambiar
+    if (tipo !== 'boleta_electronica' && document.getElementById('inputDni')) {
+        document.getElementById('inputDni').value = '';
+        const dd = document.getElementById('dniDatos');
+        const de = document.getElementById('dniError');
+        if (dd) dd.style.display = 'none';
+        if (de) de.style.display = 'none';
+        nombreCompletoDni = '';
+    }
+    if (tipo !== 'factura' && document.getElementById('inputRuc')) {
+        document.getElementById('inputRuc').value = '';
+        const rd = document.getElementById('rucDatos');
+        const re = document.getElementById('rucError');
+        if (rd) rd.style.display = 'none';
+        if (re) re.style.display = 'none';
+        razonSocialActual = '';
+    }
+}
+
+// Auto-consultar RUC cuando tiene 11 dígitos (API SUNAT)
+const TOKEN_SUNAT = 'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJlbWFpbCI6ImkyNTEzNzAyQGNvbnRpbmVudGFsLmVkdS5wZSJ9.o02LSzKdddnW-h9XO-sf5hFbquw5vroU6ZAoFhbl9mY';
+const BASE_SUNAT = 'https://dniruc.apisperu.com/api/v1';
+
+document.addEventListener('DOMContentLoaded', function() {
+    const inputRuc = document.getElementById('inputRuc');
+    if (inputRuc) {
+        inputRuc.addEventListener('input', function() {
+            this.value = this.value.replace(/\D/g,'').slice(0,11);
+            const ruc = this.value;
+            const feedback   = document.getElementById('rucFeedback');
+            const rucDatos   = document.getElementById('rucDatos');
+            const rucError   = document.getElementById('rucError');
+            if (ruc.length === 11) {
+                feedback.innerHTML = '<i class="fa fa-spinner fa-spin me-1"></i>Consultando SUNAT...';
+                rucDatos.style.display = 'none';
+                rucError.style.display = 'none';
+                fetch(`${BASE_SUNAT}/ruc/${ruc}?token=${TOKEN_SUNAT}`)
+                    .then(r => r.json())
+                    .then(d => {
+                        const razonSocial = d.razonSocial || d.razon_social || d.nombre || '';
+                        if (razonSocial) {
+                            razonSocialActual = razonSocial;
+                            document.getElementById('rucRazonSocial').textContent = razonSocial;
+                            document.getElementById('rucTipo').textContent = d.tipoContribuyente || d.tipo || '';
+                            const direccion = d.direccion || d.domicilioFiscal || d.direccionCompleta || '';
+                            document.getElementById('rucDireccion').textContent = direccion ? '📍 ' + direccion : '';
+                            const estado = d.estado || '';
+                            const condicion = d.condicion || '';
+                            document.getElementById('rucEstado').innerHTML =
+                                `<span style="color:${estado.toLowerCase().includes('activo') ? '#28a745' : '#dc3545'};font-weight:600">
+                                    ${estado}${condicion ? ' · ' + condicion : ''}
+                                </span>`;
+                            rucDatos.style.display = 'block';
+                            rucError.style.display = 'none';
+                            feedback.innerHTML = '<i class="fa fa-check me-1" style="color:#28a745"></i>RUC verificado correctamente';
+                        } else {
+                            rucDatos.style.display = 'none';
+                            rucError.textContent = '⚠ RUC no encontrado en SUNAT. Verifica el número ingresado.';
+                            rucError.style.display = 'block';
+                            feedback.textContent = '';
+                        }
+                    })
+                    .catch(() => {
+                        rucDatos.style.display = 'none';
+                        rucError.textContent = '⚠ No se pudo conectar a SUNAT. Verifica tu conexión e inténtalo de nuevo.';
+                        rucError.style.display = 'block';
+                        feedback.textContent = '';
+                    });
+            } else {
+                rucDatos.style.display = 'none';
+                rucError.style.display = 'none';
+                feedback.innerHTML = '<i class="fa fa-info-circle me-1"></i>Los datos de la empresa aparecerán automáticamente';
+            }
+        });
+    }
+    const inputDni = document.getElementById('inputDni');
+    if (inputDni) {
+        inputDni.addEventListener('input', function() {
+            this.value = this.value.replace(/\D/g,'').slice(0,8);
+            const dni = this.value;
+            const feedback  = document.getElementById('dniFeedback');
+            const dniDatos  = document.getElementById('dniDatos');
+            const dniError  = document.getElementById('dniError');
+            if (dni.length === 8) {
+                feedback.innerHTML = '<i class="fa fa-spinner fa-spin me-1"></i>Consultando RENIEC...';
+                dniDatos.style.display = 'none';
+                dniError.style.display = 'none';
+                fetch(`${BASE_SUNAT}/dni/${dni}?token=${TOKEN_SUNAT}`)
+                    .then(r => r.json())
+                    .then(d => {
+                        const nombres = d.nombres || d.nombre || '';
+                        const apPat = d.apellidoPaterno || d.apellido_paterno || d.primerApellido || '';
+                        const apMat = d.apellidoMaterno || d.apellido_materno || d.segundoApellido || '';
+                        const completo = [nombres, apPat, apMat].filter(Boolean).join(' ');
+                        if (completo) {
+                            nombreCompletoDni = completo;
+                            document.getElementById('dniNombreCompleto').textContent = completo;
+                            dniDatos.style.display = 'block';
+                            dniError.style.display = 'none';
+                            feedback.innerHTML = '<i class="fa fa-check me-1" style="color:#28a745"></i>DNI verificado correctamente';
+                        } else {
+                            dniDatos.style.display = 'none';
+                            dniError.textContent = '⚠ DNI no encontrado en RENIEC. Verifica el número.';
+                            dniError.style.display = 'block';
+                            feedback.textContent = '';
+                        }
+                    })
+                    .catch(() => {
+                        dniDatos.style.display = 'none';
+                        dniError.textContent = '⚠ No se pudo conectar a RENIEC. Verifica tu conexión.';
+                        dniError.style.display = 'block';
+                        feedback.textContent = '';
+                    });
+            } else {
+                dniDatos.style.display = 'none';
+                dniError.style.display = 'none';
+                feedback.innerHTML = '<i class="fa fa-info-circle me-1"></i>Ingresa tu DNI para que la boleta sea emitida a tu nombre';
+                nombreCompletoDni = '';
+            }
+        });
+    }
+});
+
+function irPaso3() {
+    if (!tipoComprobante) return;
+    // Construir resumen
+    const carrito = getCarrito();
+    const total = carrito.reduce((s, i) => s + i.precio * i.cantidad, 0);
+    const ruc = document.getElementById('inputRuc') ? document.getElementById('inputRuc').value.trim() : '';
+    const dni = document.getElementById('inputDni') ? document.getElementById('inputDni').value.trim() : '';
+    const metodoLabel = metodoPago === 'tarjeta' ? 'Tarjeta de débito/crédito' : 'Yape / Plin';
+    const compLabel = tipoComprobante === 'boleta_electronica' ? 'Boleta Electrónica' : 'Factura';
+    // Validar RUC obligatorio para factura
+    if (tipoComprobante === 'factura' && ruc.length !== 11) {
+        alert('Para factura debes ingresar el RUC de 11 dígitos.'); return;
+    }
+    let html = `
+        <div class="mb-2"><strong>Método de pago:</strong> ${metodoLabel}</div>
+        <div class="mb-2"><strong>Comprobante:</strong> ${compLabel}`;
+    if (tipoComprobante === 'factura' && ruc) {
+        html += ` – RUC: ${ruc}`;
+        if (razonSocialActual) html += `<br><span style="font-size:0.85rem;color:#555">${razonSocialActual}</span>`;
+    }
+    if (tipoComprobante === 'boleta_electronica' && dni) {
+        html += ` – DNI: ${dni}`;
+        if (nombreCompletoDni) html += `<br><span style="font-size:0.85rem;color:#555">${nombreCompletoDni}</span>`;
+    }
+    html += `</div><div class="mb-2"><strong>Productos:</strong></div><ul style="margin:0;padding-left:18px">`;
+    carrito.forEach(i => { html += `<li>${i.nombre} × ${i.cantidad} = S/ ${(i.precio * i.cantidad).toFixed(2)}</li>`; });
+    html += `</ul><div class="mt-2 fw-bold" style="font-size:1rem;color:var(--naranja)">TOTAL: S/ ${total.toFixed(2)}</div>`;
+    document.getElementById('resumenConfirmar').innerHTML = html;
+    irPaso(3);
+}
+
+function confirmarPedidoFinal() {
+    const carrito = getCarrito();
+    if (carrito.length === 0) return;
+    const ruc = document.getElementById('inputRuc') ? document.getElementById('inputRuc').value.trim() : '';
+    const dni = document.getElementById('inputDni') ? document.getElementById('inputDni').value.trim() : '';
+    const numOp = document.getElementById('numOperacion') ? document.getElementById('numOperacion').value.trim() : '';
+    // Validar RUC si es factura
+    if (tipoComprobante === 'factura' && ruc.length !== 11) {
+        alert('Para factura debes ingresar el RUC de 11 dígitos.'); return;
+    }
+    fetch('/carrito/confirmar_v2', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            items: carrito,
+            metodo_pago: metodoPago,
+            tipo_comprobante: tipoComprobante,
+            ruc: ruc,
+            dni: dni,
+            num_operacion: numOp
+        })
+    })
+    .then(r => r.json())
+    .then(d => {
+        if (d.ok) {
+            localStorage.removeItem('carrito_cleoferr');
+            const idPedido = d.id_pedido || '';
+            // cerrar modal y redirigir a pedido aceptado
+            bootstrap.Modal.getInstance(document.getElementById('modalPago')).hide();
+            window.location.href = '/pedido_aceptado' + (idPedido ? '?id=' + idPedido : '');
+        } else {
+            alert('Error al procesar el pedido: ' + (d.error || 'intenta de nuevo'));
+        }
+    })
+    .catch(() => alert('Error de conexión. Intenta de nuevo.'));
+}
+
+// Formateo tarjeta
+function formatCard(input) {
+    let v = input.value.replace(/\D/g,'').substring(0,16);
+    input.value = v.replace(/(.{4})/g,'$1 ').trim();
+    // Update card preview
+    const prev = document.getElementById('previewNum');
+    if (prev) {
+        const digits = v.padEnd(16,'•');
+        prev.textContent = digits.substring(0,4) + ' ' + digits.substring(4,8) + ' ' + digits.substring(8,12) + ' ' + digits.substring(12,16);
+    }
+}
+function formatExpiry(input) {
+    let v = input.value.replace(/\D/g,'').substring(0,4);
+    if (v.length >= 3) v = v.substring(0,2) + '/' + v.substring(2);
+    input.value = v;
+    const prev = document.getElementById('previewVenc');
+    if (prev) prev.textContent = v || 'MM/AA';
+}
+
+renderCarrito();
+</script>
+{% endblock %}

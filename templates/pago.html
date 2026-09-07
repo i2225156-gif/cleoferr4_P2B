@@ -1,0 +1,50 @@
+{% extends 'base.html' %}
+{% block titulito %}Pago – Cleoferr{% endblock %}
+{% block contenido %}
+
+<div class="page-header">
+    <h2><i class="fa fa-credit-card me-2"></i>Proceso de Pago</h2>
+</div>
+
+{% if productos %}
+<table class="table table-striped">
+    <thead>
+        <tr>
+            <th>Producto</th>
+            <th>Precio</th>
+            <th>Cantidad</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for p in productos %}
+        <tr>
+            <td>{{ p.nombre }}</td>
+            <td>S/ {{ "%.2f"|format(p.precio|float) }}</td>
+            <td>1</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+<div class="mt-4">
+    <form method="post" action="/procesar_pago">
+        <div class="mb-3">
+            <label for="metodo" class="form-label">Método de Pago</label>
+            <select id="metodo" name="metodo" class="form-select">
+                <option value="tarjeta">Tarjeta de Crédito/Débito</option>
+                <option value="yape">Yape</option>
+                <option value="plin">Plin</option>
+            </select>
+        </div>
+        <button type="submit" class="btn btn-primary">
+            <i class="fa fa-check me-2"></i>Confirmar Pago
+        </button>
+    </form>
+</div>
+{% else %}
+<div class="col-12 text-center py-5 text-muted">
+    <i class="fa fa-credit-card fa-2x mb-2 d-block"></i>No hay productos para pagar
+</div>
+{% endif %}
+
+{% endblock %}

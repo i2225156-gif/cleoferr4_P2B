@@ -1,0 +1,154 @@
+{% extends 'base.html' %}
+{% block titulito %}{% if producto %}Editar{% else %}Nuevo{% endif %} Producto – Cleoferr{% endblock %}
+{% block contenido %}
+
+<div class="page-header">
+    <div>
+        <h2><i class="fa fa-{% if producto %}edit{% else %}plus{% endif %} me-2"></i>
+            {% if producto %}Editar Producto{% else %}Nuevo Producto{% endif %}
+        </h2>
+    </div>
+    <a href="/productos" class="btn btn-outline-light"><i class="fa fa-arrow-left me-1"></i>Volver</a>
+</div>
+
+<div class="card card-custom" style="max-width:700px">
+    <div class="card-body p-4">
+        <form method="POST" enctype="multipart/form-data" action="{% if producto %}/productos/actualizar/{{ producto.id_producto }}{% else %}/productos/guardar{% endif %}">
+            <div class="row g-3">
+                <div class="col-md-8">
+                    <label class="form-label fw-semibold">Nombre del producto *</label>
+                    <input type="text" name="nombre" class="form-control"
+                           value="{{ producto.nombre if producto else '' }}" required>
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label fw-semibold">Estado</label>
+                    <select name="estado" class="form-select">
+                        <option value="activo" {% if not producto or producto.estado=='activo' %}selected{% endif %}>Activo</option>
+                        <option value="inactivo" {% if producto and producto.estado=='inactivo' %}selected{% endif %}>Inactivo</option>
+                    </select>
+                </div>
+                <div class="col-12">
+                    <label class="form-label fw-semibold">Descripción</label>
+                    <textarea name="descripcion" class="form-control" rows="3">{{ producto.descripcion if producto else '' }}</textarea>
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label fw-semibold">Precio (S/) *</label>
+                    <input type="number" name="precio" step="0.01" min="0" class="form-control"
+                           value="{{ producto.precio if producto else '' }}" required>
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label fw-semibold">Stock *</label>
+                    <input type="number" name="stock" min="0" class="form-control"
+                           value="{{ producto.stock if producto else 0 }}" required>
+                </div>
+                <div class="col-12">
+    <label class="form-label fw-semibold">
+        <i class="fa fa-image me-1" style="color:var(--naranja)"></i>
+        Imagen del producto
+    </label>
+
+    {% if producto and producto.imagen %}
+    <div style="border:2px solid #e0e0e0; border-radius:10px; overflow:hidden; margin-bottom:10px; max-width:260px">
+        <img src="{{ url_for('static', filename='img/' ~ producto.imagen) }}"
+             style="width:100%; height:150px; object-fit:contain; background:white; display:block"
+             onerror="this.parentElement.style.display='none'">
+        <div style="padding:6px 12px; font-size:0.78rem; color:#666; background:#f5f5f5; border-top:1px solid #eee">
+            <i class="fa fa-check-circle text-success me-1"></i>
+            Imagen actual: <strong>{{ producto.imagen }}</strong> — sube una nueva para reemplazarla
+        </div>
+    </div>
+    {% endif %}
+
+    <div id="zonaImagen" style="border:2px dashed #d0d0d0; border-radius:12px; padding:24px;
+         text-align:center; cursor:pointer; background:#fafafa; position:relative; transition:all 0.2s"
+         onmouseover="this.style.borderColor='#E8580A'; this.style.background='rgba(232,88,10,0.04)'"
+         onmouseout="this.style.borderColor='#d0d0d0'; this.style.background='#fafafa'">
+        <input type="file" name="imagen" id="inputImagen"
+               accept="image/jpeg,image/png,image/webp,image/gif"
+               style="position:absolute; inset:0; opacity:0; cursor:pointer; width:100%; height:100%">
+        <i class="fa fa-cloud-upload-alt" style="font-size:2rem; color:#ccc; display:block; margin-bottom:8px"></i>
+        <div style="font-size:0.88rem; color:#888">
+            <span style="color:#E8580A; font-weight:600">Haz clic aquí</span> o arrastra una imagen
+        </div>
+        <div style="font-size:0.75rem; color:#bbb; margin-top:4px">JPG, PNG, WEBP, GIF · Máximo 5 MB</div>
+    </div>
+
+    <div id="previewWrap" style="display:none; border:2px solid #e0e0e0; border-radius:10px;
+         overflow:hidden; margin-top:8px; position:relative; max-width:260px">
+        <img id="previewImg" src="" style="width:100%; height:150px; object-fit:contain; background:white; display:block">
+        <button type="button" onclick="quitarImagen()"
+                style="position:absolute; top:6px; right:6px; background:rgba(0,0,0,0.5);
+                       color:white; border:none; border-radius:50%; width:28px; height:28px; cursor:pointer">
+            <i class="fa fa-times"></i>
+        </button>
+        <div id="nombreArchivo" style="padding:6px 12px; font-size:0.78rem; color:#555;
+             background:#f8f8f8; border-top:1px solid #eee; white-space:nowrap;
+             overflow:hidden; text-overflow:ellipsis"></div>
+    </div>
+</div>
+                <div class="col-md-6">
+                    <label class="form-label fw-semibold">Categoría *</label>
+                    <select name="id_categoria" class="form-select" required>
+                        <option value="">-- Seleccionar --</option>
+                        {% for c in categorias %}
+                            <option value="{{ c.id_categoria }}"
+                                {% if producto and producto.id_categoria == c.id_categoria %}selected{% endif %}>
+                                {{ c.nombre }}
+                            </option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="col-md-6">
+                    <label class="form-label fw-semibold">Marca *</label>
+                    <select name="id_marca" class="form-select" required>
+                        <option value="">-- Seleccionar --</option>
+                        {% for m in marcas %}
+                            <option value="{{ m.id_marca }}"
+                                {% if producto and producto.id_marca == m.id_marca %}selected{% endif %}>
+                                {{ m.nombre }}
+                            </option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="col-12 mt-2">
+                    <div class="d-flex gap-2">
+                        <button type="submit" class="btn btn-naranja px-4">
+                            <i class="fa fa-save me-1"></i>{% if producto %}Actualizar{% else %}Guardar{% endif %}
+                        </button>
+                        <a href="/productos" class="btn btn-outline-secondary px-4">Cancelar</a>
+                    </div>
+                </div>
+            </div>
+        </form>
+    </div>
+</div>
+<script>
+const inputImagen = document.getElementById('inputImagen');
+
+inputImagen.addEventListener('change', function () {
+    const archivo = this.files[0];
+    if (!archivo) return;
+    if (archivo.size > 5 * 1024 * 1024) {
+        alert('⚠️ La imagen supera los 5 MB.');
+        this.value = '';
+        return;
+    }
+    const reader = new FileReader();
+    reader.onload = e => {
+        document.getElementById('previewImg').src = e.target.result;
+        document.getElementById('nombreArchivo').textContent =
+            '📎 ' + archivo.name + ' (' + (archivo.size / 1024).toFixed(1) + ' KB)';
+        document.getElementById('previewWrap').style.display = 'block';
+        document.getElementById('zonaImagen').style.display  = 'none';
+    };
+    reader.readAsDataURL(archivo);
+});
+
+function quitarImagen() {
+    inputImagen.value = '';
+    document.getElementById('previewImg').src = '';
+    document.getElementById('previewWrap').style.display = 'none';
+    document.getElementById('zonaImagen').style.display  = 'block';
+}
+</script>
+{% endblock %}

@@ -1,0 +1,126 @@
+{% extends 'base.html' %}
+{% block titulito %}Pedido Aceptado – Cleoferr{% endblock %}
+{% block contenido %}
+
+<style>
+.pedido-ok-wrap { max-width: 640px; margin: 0 auto; text-align: center; padding: 20px 0; }
+.check-anim {
+    width: 90px; height: 90px; background: linear-gradient(135deg, #28a745, #34ce57);
+    border-radius: 50%; display: flex; align-items: center; justify-content: center;
+    margin: 0 auto 24px; box-shadow: 0 8px 30px rgba(40,167,69,0.35);
+    animation: popIn 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+@keyframes popIn { from { transform: scale(0.3); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+.check-anim i { font-size: 2.5rem; color: white; }
+.pedido-numero { font-size: 1.8rem; font-weight: 900; color: var(--gris-oscuro); margin-bottom: 4px; }
+.pedido-sub { color: #777; margin-bottom: 28px; font-size: 0.95rem; }
+
+/* Timeline fases */
+.fases-timeline { text-align: left; margin: 0 auto; max-width: 480px; }
+.fase-item { display: flex; align-items: flex-start; gap: 16px; padding: 12px 0; position: relative; }
+.fase-item:not(:last-child)::after {
+    content: ''; position: absolute; left: 18px; top: 44px;
+    width: 2px; height: calc(100% - 12px); background: #e0e0e0;
+}
+.fase-item.activa:not(:last-child)::after { background: var(--naranja); }
+.fase-dot {
+    width: 38px; height: 38px; border-radius: 50%; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1rem; border: 2px solid #ddd; background: #f5f5f5; color: #bbb;
+    position: relative; z-index: 1;
+}
+.fase-dot.activa { background: var(--naranja); border-color: var(--naranja); color: white; }
+.fase-dot.hecha { background: #28a745; border-color: #28a745; color: white; }
+.fase-dot.pendiente { background: #f5f5f5; border-color: #ddd; color: #ccc; }
+.fase-info { padding-top: 6px; }
+.fase-info strong { font-weight: 700; color: var(--gris-oscuro); font-size: 0.95rem; }
+.fase-info small { display: block; color: #999; font-size: 0.8rem; margin-top: 2px; }
+.fase-info .badge-activa {
+    display: inline-block; background: var(--naranja); color: white;
+    font-size: 0.7rem; font-weight: 700; padding: 2px 8px; border-radius: 20px; margin-left: 8px;
+}
+.info-recojo {
+    background: #fff8f0; border: 2px solid var(--naranja); border-radius: 12px;
+    padding: 18px 22px; text-align: left; margin-top: 24px;
+}
+.info-recojo h6 { font-weight: 800; color: var(--gris-oscuro); margin-bottom: 8px; }
+</style>
+
+<div class="pedido-ok-wrap">
+    <div class="check-anim"><i class="fa fa-check"></i></div>
+    <div class="pedido-numero">¡Pedido #{{ id_pedido }} aceptado!</div>
+    <div class="pedido-sub">Tu pedido ha sido registrado correctamente. Nos pondremos en contacto contigo pronto.</div>
+
+    <!-- Timeline de fases -->
+    <div class="fases-timeline">
+        <div class="fase-item {% if estado in ('pendiente','confirmado','preparando','listo','entregado') %}activa{% endif %}">
+            <div class="fase-dot {% if estado == 'pendiente' %}activa{% elif estado in ('confirmado','preparando','listo','entregado') %}hecha{% else %}pendiente{% endif %}">
+                <i class="fa fa-clock"></i>
+            </div>
+            <div class="fase-info">
+                <strong>Pedido recibido{% if estado == 'pendiente' %}<span class="badge-activa">AHORA</span>{% endif %}</strong>
+                <small>Tu pedido ha sido registrado en nuestro sistema</small>
+            </div>
+        </div>
+
+        <div class="fase-item {% if estado in ('confirmado','preparando','listo','entregado') %}activa{% endif %}">
+            <div class="fase-dot {% if estado == 'confirmado' %}activa{% elif estado in ('preparando','listo','entregado') %}hecha{% else %}pendiente{% endif %}">
+                <i class="fa fa-check-circle"></i>
+            </div>
+            <div class="fase-info">
+                <strong>Pedido confirmado{% if estado == 'confirmado' %}<span class="badge-activa">EN CURSO</span>{% endif %}</strong>
+                <small>Nuestro equipo verificó tu pedido y pago</small>
+            </div>
+        </div>
+
+        <div class="fase-item {% if estado in ('preparando','listo','entregado') %}activa{% endif %}">
+            <div class="fase-dot {% if estado == 'preparando' %}activa{% elif estado in ('listo','entregado') %}hecha{% else %}pendiente{% endif %}">
+                <i class="fa fa-box"></i>
+            </div>
+            <div class="fase-info">
+                <strong>Preparando tu pedido{% if estado == 'preparando' %}<span class="badge-activa">EN CURSO</span>{% endif %}</strong>
+                <small>Estamos preparando y empacando tus productos</small>
+            </div>
+        </div>
+
+        <div class="fase-item {% if estado in ('listo','entregado') %}activa{% endif %}">
+            <div class="fase-dot {% if estado == 'listo' %}activa{% elif estado == 'entregado' %}hecha{% else %}pendiente{% endif %}">
+                <i class="fa fa-store"></i>
+            </div>
+            <div class="fase-info">
+                <strong>Listo para recoger{% if estado == 'listo' %}<span class="badge-activa">¡LISTO!</span>{% endif %}</strong>
+                <small>Tu pedido está en tienda esperándote</small>
+            </div>
+        </div>
+
+        <div class="fase-item {% if estado == 'entregado' %}activa{% endif %}">
+            <div class="fase-dot {% if estado == 'entregado' %}hecha{% else %}pendiente{% endif %}">
+                <i class="fa fa-handshake"></i>
+            </div>
+            <div class="fase-info">
+                <strong>Entregado{% if estado == 'entregado' %}<span class="badge-activa">COMPLETADO</span>{% endif %}</strong>
+                <small>Pedido entregado al cliente</small>
+            </div>
+        </div>
+    </div>
+
+    <div class="info-recojo">
+        <h6><i class="fa fa-map-marker-alt me-2" style="color:var(--naranja)"></i>Recojo en tienda</h6>
+        <p class="mb-1" style="font-size:0.88rem;color:#555">
+            <strong>Inversiones CLEOFERR</strong><br>
+            Av. Los Proceres Nro. 810, Chilca, Huancayo
+        </p>
+        <p class="mb-0" style="font-size:0.82rem;color:#888">
+            <i class="fa fa-clock me-1"></i>Lun – Sáb: 8:00 am – 6:00 pm
+            &nbsp;·&nbsp;
+            <i class="fa fa-phone me-1"></i>+51 900 555 015
+        </p>
+    </div>
+
+    <div class="d-flex gap-3 justify-content-center mt-4 flex-wrap">
+        <a href="/catalogo" class="btn btn-naranja px-4">
+            <i class="fa fa-store me-1"></i>Seguir comprando
+        </a>
+    </div>
+</div>
+{% endblock %}

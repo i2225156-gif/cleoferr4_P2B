@@ -1,0 +1,60 @@
+{% extends 'base.html' %}
+{% block titulito %}Cambiar Contraseña – Cleoferr{% endblock %}
+{% block contenido %}
+
+<div class="page-header">
+    <div>
+        <h2><i class="fa fa-key me-2"></i>Cambiar Contraseña</h2>
+    </div>
+    <a href="/productos" class="btn btn-outline-light"><i class="fa fa-arrow-left me-1"></i>Volver</a>
+</div>
+
+<div class="card card-custom" style="max-width:450px">
+    <div class="card-body p-4">
+        {% if error %}
+            <div class="alert alert-danger"><i class="fa fa-exclamation-circle me-2"></i>{{ error }}</div>
+        {% endif %}
+        <form method="POST">
+            <div class="mb-3">
+                <label class="form-label fw-semibold">Nueva contraseña</label>
+                <div style="position:relative">
+                    <input type="password" name="nueva" id="campoPw1"
+                           class="form-control pe-5" required minlength="6" placeholder="Mínimo 6 caracteres">
+                    <button type="button" onclick="togglePw('campoPw1','icon1')"
+                            style="position:absolute;right:0;top:0;height:100%;background:transparent;border:none;padding:0 14px;color:#aaa;cursor:pointer">
+                        <i class="fa fa-eye" id="icon1"></i>
+                    </button>
+                </div>
+            </div>
+            <div class="mb-4">
+                <label class="form-label fw-semibold">Confirmar contraseña</label>
+                <div style="position:relative">
+                    <input type="password" name="confirmar" id="campoPw2"
+                           class="form-control pe-5" required minlength="6" placeholder="Repite la contraseña">
+                    <button type="button" onclick="togglePw('campoPw2','icon2')"
+                            style="position:absolute;right:0;top:0;height:100%;background:transparent;border:none;padding:0 14px;color:#aaa;cursor:pointer">
+                        <i class="fa fa-eye" id="icon2"></i>
+                    </button>
+                </div>
+            </div>
+            <button type="submit" class="btn btn-naranja px-4">
+                <i class="fa fa-save me-1"></i>Actualizar Contraseña
+            </button>
+        </form>
+    </div>
+</div>
+
+<script>
+function togglePw(inputId, iconId) {
+    const input = document.getElementById(inputId);
+    const icon  = document.getElementById(iconId);
+    if (input.type === 'password') {
+        input.type = 'text';
+        icon.classList.replace('fa-eye', 'fa-eye-slash');
+    } else {
+        input.type = 'password';
+        icon.classList.replace('fa-eye-slash', 'fa-eye');
+    }
+}
+</script>
+{% endblock %}

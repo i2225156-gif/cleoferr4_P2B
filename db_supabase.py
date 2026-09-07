@@ -43,11 +43,39 @@ engine_auth = _crear_engine("DATABASE_URI_AUTH")
 engine_tienda = _crear_engine("DATABASE_URI_TIENDA")
 
 
+class _CompatConnection:
+    """Envuelve una conexión DBAPI de psycopg2 para ofrecer la misma interfaz
+    que usaba db2.py (estilo mysql.connector): ``cursor(dictionary=True)``,
+    ``commit``, ``rollback`` y ``close``.
+
+    NOTA: los placeholders ``%s`` son válidos también en psycopg2, así que las
+    consultas parametrizadas existentes siguen funcionando tal cual.
+    """
+
+    def __init__(self, raw):
+        self._raw = raw
+
+    def cursor(self, dictionary=False, **kwargs):
+        if dictionary:
+            import psycopg2.extras
+            return self._raw.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        return self._raw.cursor()
+
+    def commit(self):
+        self._raw.commit()
+
+    def rollback(self):
+        self._raw.rollback()
+
+    def close(self):
+        self._raw.close()
+
+
 def get_connection_auth():
-    """Devuelve una conexión DBAPI de la BD de autenticación."""
-    return engine_auth.raw_connection()
+    """Conexión a la BD de autenticación (usuario, cliente, rol, sesion)."""
+    return _CompatConnection(engine_auth.raw_connection())
 
 
 def get_connection_tienda():
-    """Devuelve una conexión DBAPI de la BD de la tienda."""
-    return engine_tienda.raw_connection()
+    """Conexión a la BD de la tienda (producto, venta, inventario, caja, etc.)."""
+    return _CompatConnection(engine_tienda.raw_connection())

@@ -1,0 +1,59 @@
+{% extends 'base.html' %}
+{% block titulito %}Proveedores – Cleoferr{% endblock %}
+{% block contenido %}
+
+<div class="page-header">
+    <div>
+        <h2><i class="fa fa-truck me-2"></i>PROVEEDORES</h2>
+        <p>Gestión de proveedores: añadir, editar, eliminar y consultar datos de contacto. Total: {{ proveedores|length }}</p>
+    </div>
+    <div class="d-flex gap-2">
+        <a href="/proveedores/nuevo" class="btn btn-naranja">
+            <i class="fa fa-plus me-1"></i> Nuevo Proveedor
+        </a>
+        <a href="/reportes/proveedores/exportar" class="btn btn-outline-secondary">
+            <i class="fa fa-file-excel me-1"></i> Exportar Excel
+        </a>
+    </div>
+</div>
+
+<div class="row g-3 mb-4">
+    {% for p in proveedores %}
+    <div class="col-md-4">
+        <div class="card card-custom h-100">
+            <div class="card-body">
+                <div class="d-flex align-items-start gap-3">
+                    <div class="stat-icon">
+                        <i class="fa fa-truck"></i>
+                    </div>
+                    <div class="flex-grow-1">
+                        <h6 class="fw-bold mb-1">{{ p.nombre }}</h6>
+                        {% if p.contacto %}<p class="mb-1 text-muted small"><i class="fa fa-user me-1"></i>{{ p.contacto }}</p>{% endif %}
+                        {% if p.telefono %}<p class="mb-1 text-muted small"><i class="fa fa-phone me-1"></i>{{ p.telefono }}</p>{% endif %}
+                        {% if p.email %}<p class="mb-1 text-muted small"><i class="fa fa-envelope me-1"></i>{{ p.email }}</p>{% endif %}
+                        {% if p.direccion %}<p class="mb-1 text-muted small"><i class="fa fa-map-marker me-1"></i>{{ p.direccion }}</p>{% endif %}
+                    </div>
+                </div>
+                <div class="d-flex gap-2 mt-3">
+                    <a href="/proveedores/editar/{{ p.id_proveedor }}" class="btn btn-sm btn-outline-warning">
+                        <i class="fa fa-edit me-1"></i>Editar
+                    </a>
+                    {# Reemplazar el link de eliminar por un formulario POST seguro #}
+                    <form method="POST" action="/proveedores/eliminar/{{ p.id_proveedor }}" style="display:inline" onsubmit="return confirm('¿Confirma eliminar este proveedor?');">
+                        <button type="submit" class="btn btn-sm btn-outline-danger" title="Eliminar">
+                            <i class="fa fa-trash"></i>
+                        </button>
+                    </form>
+                    {# Fin del formulario de eliminación #}
+                </div>
+            </div>
+        </div>
+    </div>
+    {% else %}
+    <div class="col-12 text-center py-5 text-muted">
+        <i class="fa fa-truck fa-2x mb-2 d-block"></i>
+        No hay proveedores registrados
+    </div>
+    {% endfor %}
+</div>
+{% endblock %}

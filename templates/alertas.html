@@ -1,0 +1,112 @@
+{% extends 'base.html' %}
+{% block titulito %}Alertas – Cleoferr{% endblock %}
+{% block contenido %}
+
+<div class="page-header">
+    <div>
+        <h2><i class="fa fa-bell me-2"></i>ALERTAS</h2>
+        <p>Alertas próximas: bajos stocks, pedidos pendientes o vencimientos. Gestiona y programa acciones.</p>
+    </div>
+    <div>
+        <a href="/alertas/programar" class="btn btn-outline-secondary"><i class="fa fa-calendar-plus me-1"></i>Programar reabastecimiento</a>
+    </div>
+</div>
+
+{% if bajo_stock %}
+<div class="card card-custom mb-3 border-{{ 'danger' if bajo_stock[0].stock < 5 else 'warning' }}">
+    <div class="card-header d-flex justify-content-between align-items-center" style="background:#dc3545;color:white">
+        <span><i class="fa fa-exclamation-triangle me-2"></i>Alertas de inventario — productos con stock &lt; 15</span>
+        <span class="badge bg-light text-dark">{{ bajo_stock|length }} producto(s)</span>
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-custom table-hover mb-0">
+                <thead>
+                    <tr>
+                        <th>Producto</th>
+                        <th>Stock actual</th>
+                        <th>Estado</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for p in bajo_stock %}
+                    {% if p.stock == 0 %}
+                        {% set fila_color = 'table-danger' %}
+                        {% set badge_clase = 'bg-danger' %}
+                        {% set estado_texto = 'SIN STOCK' %}
+                    {% elif p.stock < 5 %}
+                        {% set fila_color = 'table-danger' %}
+                        {% set badge_clase = 'bg-danger' %}
+                        {% set estado_texto = 'CRÍTICO' %}
+                    {% elif p.stock < 10 %}
+                        {% set fila_color = 'table-warning' %}
+                        {% set badge_clase = 'bg-warning text-dark' %}
+                        {% set estado_texto = 'BAJO' %}
+                    {% else %}
+                        {% set fila_color = 'table-info' %}
+                        {% set badge_clase = 'bg-info text-dark' %}
+                        {% set estado_texto = 'MÍNIMO' %}
+                    {% endif %}
+                    <tr class="{{ fila_color }}">
+                        <td class="fw-semibold">{{ p.nombre }}</td>
+                        <td><span class="badge {{ badge_clase }} fs-6">{{ p.stock }}</span></td>
+                        <td><span class="badge {{ badge_clase }}">{{ estado_texto }}</span></td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+<div class="card card-custom">
+    <div class="card-header">
+        <i class="fa fa-exclamation-circle me-2"></i>Listado de alertas
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-custom table-hover mb-0">
+                <thead>
+                    <tr>
+                        <th>Fecha</th>
+                        <th>Tipo</th>
+                        <th>Descripción</th>
+                        <th>Relacionado</th>
+                        <th>Prioridad</th>
+                        <th>Acciones</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for a in alertas %}
+                    <tr>
+                        <td><small>{{ a.fecha.strftime('%d/%m/%Y %H:%M') if a.fecha else '–' }}</small></td>
+                        <td>{{ a.tipo or '–' }}</td>
+                        <td>{{ a.descripcion or '–' }}</td>
+                        <td>{{ a.relacionado or '–' }}</td>
+                        <td>
+                            <span class="badge {% if a.prioridad=='alta' %}badge-salida{% elif a.prioridad=='media' %}badge-entrada{% else %}badge-inactivo{% endif %}">
+                                {{ a.prioridad|capitalize or '–' }}
+                            </span>
+                        </td>
+                        <td>
+                            <form method="POST" action="/alertas/resolver/{{ a.id }}" style="display:inline" onsubmit="return confirm('Marcar alerta como resuelta?');">
+                                <button class="btn btn-sm btn-outline-success" type="submit" title="Marcar resuelta"><i class="fa fa-check"></i></button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="6" class="text-center py-5 text-muted">
+                            <i class="fa fa-bell fa-2x mb-2 d-block"></i>
+                            No hay alertas por el momento
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+{% endblock %}

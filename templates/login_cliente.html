@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cleoferr – Acceso Clientes</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        :root {
+            --azul: #4682B4;
+            --azul-oscuro: #2E5E85;
+            --azul-claro: #6BA8DF;
+            --gris-oscuro: #1A1A2E;
+        }
+        body {
+            margin: 0; min-height: 100vh;
+            background: linear-gradient(135deg, #0f3460 0%, #16213e 50%, var(--azul) 100%);
+            display: flex; align-items: center; justify-content: center;
+        }
+        .login-wrapper { width: 100%; max-width: 480px; padding: 20px; }
+        .login-card { background: white; border-radius: 20px; box-shadow: 0 20px 60px rgba(0,0,0,0.4); overflow: hidden; }
+        .login-header {
+            background: linear-gradient(135deg, var(--azul), var(--azul-claro));
+            color: white; text-align: center; padding: 30px 20px;
+        }
+        .login-header .logo-wrap {
+            width: 70px; height: 70px; background: rgba(255,255,255,0.12);
+            border-radius: 50%; margin: 0 auto 12px; display: flex;
+            align-items: center; justify-content: center; font-size: 1.8rem;
+            border: 3px solid rgba(255,255,255,0.35);
+        }
+        .login-header h2 { margin: 0; font-weight: 800; font-size: 1.6rem; }
+        .login-header p { margin: 6px 0 0; opacity: 0.85; font-size: 0.88rem; }
+        /* Tabs */
+        .tabs-nav { display: flex; border-bottom: 2px solid #eee; }
+        .tab-btn {
+            flex: 1; padding: 14px; border: none; background: transparent;
+            font-weight: 700; font-size: 0.9rem; color: #888; cursor: pointer;
+            border-bottom: 3px solid transparent; margin-bottom: -2px; transition: all 0.2s;
+        }
+        .tab-btn.active { color: var(--azul); border-bottom-color: var(--azul); }
+        .tab-content { padding: 28px; display: none; }
+        .tab-content.active { display: block; }
+        .form-label { font-weight: 600; color: #333; font-size: 0.85rem; }
+        .form-control { border-radius: 8px; padding: 10px 14px; border: 2px solid #e0e0e0; font-size: 0.9rem; }
+        .form-control:focus { border-color: var(--azul); box-shadow: 0 0 0 0.2rem rgba(70,130,180,0.15); }
+        .input-group-custom { position: relative; }
+        .input-group-custom .icon-left {
+            position: absolute; left: 13px; top: 50%; transform: translateY(-50%);
+            color: #aaa; z-index: 5; pointer-events: none;
+        }
+        .input-group-custom .form-control { padding-left: 38px; padding-right: 42px; }
+        .btn-toggle-pw {
+            position: absolute; right: 0; top: 0; height: 100%;
+            background: transparent; border: none; padding: 0 13px;
+            color: #aaa; cursor: pointer; z-index: 5; transition: color 0.2s;
+        }
+        .btn-toggle-pw:hover { color: var(--azul-oscuro); }
+        .btn-login {
+            background: linear-gradient(135deg, var(--azul), var(--azul-claro));
+            border: none; color: white; font-weight: 700; font-size: 0.95rem;
+            padding: 12px; border-radius: 10px; width: 100%;
+        }
+        .btn-login:hover { background: linear-gradient(135deg, var(--azul-oscuro), var(--azul)); color: white; }
+        .btn-registrar {
+            background: linear-gradient(135deg, #28a745, #34ce57);
+            border: none; color: white; font-weight: 700; font-size: 0.95rem;
+            padding: 12px; border-radius: 10px; width: 100%;
+        }
+        .btn-registrar:hover { background: linear-gradient(135deg, #1e7e34, #28a745); color: white; }
+        .btn-verificar {
+            background: linear-gradient(135deg, #fd7e14, #e8580a);
+            border: none; color: white; font-weight: 700; font-size: 0.95rem;
+            padding: 12px; border-radius: 10px; width: 100%;
+        }
+        .link-admin {
+            text-align: center; margin-top: 14px; font-size: 0.85rem;
+            background: #f8f9fa; border-radius: 8px; padding: 10px;
+        }
+        .link-admin a { color: var(--azul); font-weight: 600; text-decoration: none; }
+        .admin-badge {
+            background: linear-gradient(135deg, #1A1A2E, #2E5E85);
+            color: white; border-radius: 8px; padding: 10px 14px;
+            margin-top: 14px; font-size: 0.83rem; text-align: center;
+        }
+        .admin-badge a { color: #6BA8DF; font-weight: 700; text-decoration: none; }
+        .admin-badge a:hover { color: white; }
+        .alert-error {
+            background: #fff3f3; border: 1px solid #ffcccc; color: #d32f2f;
+            border-radius: 8px; padding: 10px; margin-bottom: 16px; font-size: 0.88rem;
+        }
+        .alert-success {
+            background: #f0fff4; border: 1px solid #b2dfdb; color: #1b5e20;
+            border-radius: 8px; padding: 10px; margin-bottom: 16px; font-size: 0.88rem;
+        }
+        .alert-info {
+            background: #e8f4fd; border: 1px solid #b8daff; color: #084298;
+            border-radius: 8px; padding: 10px; margin-bottom: 16px; font-size: 0.88rem;
+        }
+        .form-row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+        .code-input {
+            text-align: center; font-size: 2rem; font-weight: 800;
+            letter-spacing: 12px; border: 3px solid #ddd; border-radius: 12px;
+            padding: 16px; width: 100%;
+        }
+        .code-input:focus { border-color: var(--azul); outline: none; box-shadow: 0 0 0 0.2rem rgba(70,130,180,0.15); }
+    </style>
+</head>
+<body>
+<div class="login-wrapper">
+    <div class="login-card">
+        <div class="login-header">
+            <div class="logo-wrap"><i class="fa fa-store"></i></div>
+            <h2>Portal Cliente</h2>
+            <p>Ferretería Inversiones CLEOFERR</p>
+        </div>
+
+        {% if verificar_activo %}
+        <!-- PANTALLA DE VERIFICACIÓN DE CÓDIGO -->
+        <div class="tab-content active" id="tab-verificar">
+            {% if aviso_smtp %}
+                <div class="alert-info" style="background:#fffbea;border-color:#f59e0b;color:#78350f;margin-bottom:16px">
+                    <i class="fa fa-triangle-exclamation me-2"></i>
+                    <strong>Modo desarrollo:</strong> El correo SMTP no está configurado.<br>
+                    Tu código de verificación es: <strong style="font-size:1.4rem;letter-spacing:6px;color:#1d4ed8">{{ codigo_visible }}</strong>
+                </div>
+            {% endif %}
+            {% if error %}
+                <div class="alert-error"><i class="fa fa-exclamation-circle me-2"></i>{{ error }}</div>
+            {% endif %}
+            <div style="text-align:center;margin-bottom:20px">
+                <i class="fa fa-envelope-open-text fa-3x" style="color:var(--azul);margin-bottom:12px;display:block"></i>
+                <h5 class="fw-bold">Verifica tu correo</h5>
+                <p style="font-size:0.88rem;color:#666">
+                    Te enviamos un código de 6 dígitos a<br>
+                    <strong>{{ correo_verificar }}</strong>
+                </p>
+            </div>
+            <form method="POST" action="/verificar_registro">
+                <div class="mb-4">
+                    <label class="form-label text-center d-block">Ingresa el código</label>
+                    <input type="text" name="codigo" class="code-input"
+                           placeholder="000000" maxlength="6" pattern="[0-9]{6}"
+                           inputmode="numeric" autocomplete="one-time-code" required autofocus>
+                    <div style="font-size:0.78rem;color:#888;text-align:center;margin-top:8px">
+                        <i class="fa fa-clock me-1"></i>El código es válido por 10 minutos
+                    </div>
+                </div>
+                <button type="submit" class="btn-verificar">
+                    <i class="fa fa-check-circle me-2"></i>Verificar y crear cuenta
+                </button>
+            </form>
+            <div style="text-align:center;margin-top:16px;font-size:0.83rem">
+                <a href="/login_cliente" style="color:var(--azul);font-weight:600">
+                    <i class="fa fa-arrow-left me-1"></i>Volver al registro
+                </a>
+            </div>
+        </div>
+
+        {% else %}
+        <!-- TABS NORMALES -->
+        <div class="tabs-nav">
+            <button class="tab-btn {% if not registro_activo %}active{% endif %}" onclick="cambiarTab('login')">
+                <i class="fa fa-sign-in-alt me-1"></i> Iniciar Sesión
+            </button>
+            <button class="tab-btn {% if registro_activo %}active{% endif %}" onclick="cambiarTab('registro')">
+                <i class="fa fa-user-plus me-1"></i> Registrarme
+            </button>
+        </div>
+
+        <!-- Tab Login -->
+        <div class="tab-content {% if not registro_activo %}active{% endif %}" id="tab-login">
+            {% if error and not registro_activo %}
+                <div class="alert-error"><i class="fa fa-exclamation-circle me-2"></i>{{ error }}</div>
+            {% endif %}
+            {% if success %}
+                <div class="alert-success"><i class="fa fa-check-circle me-2"></i>{{ success }}</div>
+            {% endif %}
+            <form method="POST" action="/login_cliente">
+                <div class="mb-3">
+                    <label class="form-label">Correo electrónico</label>
+                    <div class="input-group-custom">
+                        <i class="fa fa-envelope icon-left"></i>
+                        <input type="email" name="correo" class="form-control"
+                               placeholder="tu@correo.com" required>
+                    </div>
+                </div>
+                <div class="mb-4">
+                    <label class="form-label">Contraseña</label>
+                    <div class="input-group-custom" style="position:relative">
+                        <i class="fa fa-lock icon-left"></i>
+                        <input type="password" name="contrasena" id="campoCliente"
+                               class="form-control" placeholder="••••••••" required>
+                        <button type="button" class="btn-toggle-pw" onclick="togglePw('campoCliente','iconoCliente')">
+                            <i class="fa fa-eye" id="iconoCliente"></i>
+                        </button>
+                    </div>
+                </div>
+                <button type="submit" class="btn-login">
+                    <i class="fa fa-shopping-cart me-2"></i>Ingresar al Catálogo
+                </button>
+            </form>
+            {% if url_whatsapp %}
+            <div class="text-center mt-3">
+                <a href="{{ url_whatsapp }}" target="_blank" rel="noopener noreferrer"
+                    class="btn btn-success btn-sm px-4 py-2"
+                    style="border-radius:25px; font-size:0.82rem;">
+                        <i class="fa-brands fa-whatsapp me-2"></i>¿Problemas con tu acceso? Escríbenos
+                </a>
+            </div>
+            {% endif %}
+            <div class="admin-badge mt-3">
+                <i class="fa fa-shield-halved me-2"></i>
+                ¿Eres administradora? <a href="/login">Inicia sesión aquí</a>
+            </div>
+        </div>
+
+        <!-- Tab Registro -->
+        <div class="tab-content {% if registro_activo %}active{% endif %}" id="tab-registro">
+            {% if error and registro_activo %}
+                <div class="alert-error"><i class="fa fa-exclamation-circle me-2"></i>{{ error }}</div>
+            {% endif %}
+            <form method="POST" action="/registro_cliente">
+                <div class="form-row-2 mb-3">
+                    <div>
+                        <label class="form-label">Nombre *</label>
+                        <div class="input-group-custom">
+                            <i class="fa fa-user icon-left"></i>
+                            <input type="text" name="nombre" class="form-control"
+                                   placeholder="Tu nombre" required style="padding-left:38px">
+                        </div>
+                    </div>
+                    <div>
+                        <label class="form-label">Apellido</label>
+                        <input type="text" name="apellido" class="form-control" placeholder="Apellido">
+                    </div>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Correo electrónico *</label>
+                    <div class="input-group-custom">
+                        <i class="fa fa-envelope icon-left"></i>
+                        <input type="email" name="correo" class="form-control"
+                               placeholder="tu@correo.com" required>
+                    </div>
+                    <div style="font-size:0.75rem;color:#888;margin-top:4px">
+                        <i class="fa fa-info-circle me-1"></i>Recibirás un código de verificación aquí
+                    </div>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Teléfono</label>
+                    <div class="input-group-custom">
+                        <i class="fa fa-phone icon-left"></i>
+                        <input type="text" name="telefono" class="form-control"
+                               placeholder="9XXXXXXXX" maxlength="15" style="padding-left:38px">
+                    </div>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Contraseña *</label>
+                    <div class="input-group-custom" style="position:relative">
+                        <i class="fa fa-lock icon-left"></i>
+                        <input type="password" name="contrasena" id="campoReg"
+                               class="form-control" placeholder="Mínimo 6 caracteres" required minlength="6">
+                        <button type="button" class="btn-toggle-pw" onclick="togglePw('campoReg','iconoReg')">
+                            <i class="fa fa-eye" id="iconoReg"></i>
+                        </button>
+                    </div>
+                </div>
+                <div class="mb-4">
+                    <label class="form-label">Confirmar contraseña *</label>
+                    <div class="input-group-custom" style="position:relative">
+                        <i class="fa fa-lock icon-left"></i>
+                        <input type="password" name="confirmar" id="campoConf"
+                               class="form-control" placeholder="Repite tu contraseña" required minlength="6">
+                        <button type="button" class="btn-toggle-pw" onclick="togglePw('campoConf','iconoConf')">
+                            <i class="fa fa-eye" id="iconoConf"></i>
+                        </button>
+                    </div>
+                </div>
+                <button type="submit" class="btn-registrar">
+                    <i class="fa fa-paper-plane me-2"></i>Enviar código de verificación
+                </button>
+            </form>
+            <div class="admin-badge mt-3">
+                <i class="fa fa-shield-halved me-2"></i>
+                ¿Eres administradora? <a href="/login">Inicia sesión aquí</a>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+function togglePw(inputId, iconId) {
+    const input = document.getElementById(inputId);
+    const icon  = document.getElementById(iconId);
+    if (input.type === 'password') {
+        input.type = 'text';
+        icon.classList.replace('fa-eye', 'fa-eye-slash');
+    } else {
+        input.type = 'password';
+        icon.classList.replace('fa-eye-slash', 'fa-eye');
+    }
+}
+function cambiarTab(tab) {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+    document.getElementById('tab-' + tab).classList.add('active');
+    event.currentTarget.classList.add('active');
+}
+// Solo aceptar números en el campo de código
+document.querySelector('.code-input') && document.querySelector('.code-input').addEventListener('input', function() {
+    this.value = this.value.replace(/[^0-9]/g, '').slice(0, 6);
+});
+</script>
+</body>
+</html>

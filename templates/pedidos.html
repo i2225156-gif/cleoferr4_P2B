@@ -1,0 +1,148 @@
+{% extends 'base.html' %}
+{% block titulito %}Pedidos – Cleoferr{% endblock %}
+{% block contenido %}
+
+<div class="page-header">
+    <div>
+        <h2><i class="fa fa-receipt me-2"></i>PEDIDOS</h2>
+        <p>Listado de pedidos y su estado. Usa filtros para buscar por fecha, estado o cliente.</p>
+    </div>
+    <div class="d-flex gap-2">
+        <a href="/ventas/nueva" class="btn btn-naranja">
+            <i class="fa fa-plus me-1"></i> Nueva Venta
+        </a>
+        <a href="/reportes/pedidos/exportar" class="btn btn-outline-secondary">
+            <i class="fa fa-file-export me-1"></i> Exportar (Excel)
+        </a>
+    </div>
+</div>
+
+<div class="card card-custom mb-3">
+    <div class="card-body">
+        <form method="GET" class="row g-2 align-items-end">
+            <div class="col-md-3">
+                <label class="form-label fw-semibold">Fecha desde</label>
+                <input type="date" name="desde" class="form-control" value="{{ request.args.get('desde','') }}">
+            </div>
+            <div class="col-md-3">
+                <label class="form-label fw-semibold">Fecha hasta</label>
+                <input type="date" name="hasta" class="form-control" value="{{ request.args.get('hasta','') }}">
+            </div>
+            <div class="col-md-3">
+                <label class="form-label fw-semibold">Estado</label>
+                <select name="estado" class="form-select">
+                    <option value="">Todos</option>
+                    <option value="pendiente" {% if request.args.get('estado') == 'pendiente' %}selected{% endif %}>Pendiente</option>
+                    <option value="confirmado" {% if request.args.get('estado') == 'confirmado' %}selected{% endif %}>Confirmado</option>
+                    <option value="enviado" {% if request.args.get('estado') == 'enviado' %}selected{% endif %}>Enviado</option>
+                    <option value="entregado" {% if request.args.get('estado') == 'entregado' %}selected{% endif %}>Entregado</option>
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label fw-semibold">Cliente / Código</label>
+                <input type="text" name="q" class="form-control" placeholder="cliente / código" value="{{ request.args.get('q','') }}">
+            </div>
+            <div class="col-md-1">
+                <button type="submit" class="btn btn-naranja w-100"><i class="fa fa-search me-1"></i>Filtrar</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<div class="card card-custom">
+    <div class="card-header">
+        <i class="fa fa-list me-2"></i>Pedidos recientes
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-custom table-hover mb-0">
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th>Fecha</th>
+                        <th>Cliente</th>
+                        <th>Total (S/)</th>
+                        <th>Progreso</th>
+                        <th>Acciones</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for ped in pedidos %}
+                    <tr>
+                        <td class="fw-bold">{{ ped.id_pedido or ped.id }}</td>
+                        <td><small>{{ ped.fecha.strftime('%d/%m/%Y %H:%M') if ped.fecha else '–' }}</small></td>
+                        <td>{{ ped.cliente_nombre or ped.cliente }}</td>
+                        <td class="fw-semibold">S/ {{ "%.2f"|format(ped.total|float) if ped.total else '0.00' }}</td>
+                        <td style="min-width:150px">
+                            <div class="d-flex align-items-center gap-2">
+                                {% if ped.estado == 'cancelado' %}
+                                <span class="badge bg-danger">{{ ped.estado }}</span>
+                                <div class="progress-steps" style="display:inline-flex;align-items:center;gap:2px">
+                                    {% for s in range(5) %}
+                                    <div class="step-dot" style="width:10px;height:10px;border-radius:50%;background:#dc3545;border:2px solid #dc3545"></div>
+                                    {% if s < 4 %}<div style="width:8px;height:2px;background:#dc3545"></div>{% endif %}
+                                    {% endfor %}
+                                </div>
+                                {% else %}
+                                <span class="badge {% if ped.estado == 'entregado' %}badge-activo{% elif ped.estado == 'pendiente' %}badge-inactivo{% else %}badge-salida{% endif %}">
+                                    {{ ped.estado }}
+                                </span>
+                                <div class="progress-steps" style="display:inline-flex;align-items:center;gap:2px">
+                                    {% for s in range(5) %}
+                                    {% if s < ped.idx_actual %}
+                                        {% set dot_bg = 'background:var(--azul);border:2px solid var(--azul)' %}
+                                        {% set line_bg = 'background:var(--azul)' %}
+                                    {% elif s == ped.idx_actual %}
+                                        {% set dot_bg = 'background:var(--azul);border:2px solid var(--azul);box-shadow:0 0 0 3px rgba(13,110,253,0.2)' %}
+                                        {% set line_bg = 'background:#e0e0e0' %}
+                                    {% else %}
+                                        {% set dot_bg = 'background:#e0e0e0;border:2px solid #e0e0e0' %}
+                                        {% set line_bg = 'background:#e0e0e0' %}
+                                    {% endif %}
+                                    <div class="step-dot" style="width:10px;height:10px;border-radius:50%;{{ dot_bg }}"></div>
+                                    {% if s < 4 %}<div style="width:8px;height:2px;{{ line_bg }}"></div>{% endif %}
+                                    {% endfor %}
+                                </div>
+                                {% endif %}
+                            </div>
+                        </td>
+                        <td>
+                            <div class="d-flex gap-1">
+                                <a href="/pedidos/detalle/{{ ped.id_pedido }}" class="btn btn-sm btn-outline-info" title="Ver detalle"><i class="fa fa-eye"></i></a>
+                                {% if session.rol in ['administrador', 'vendedor'] %}
+                                <form method="POST" action="/pedidos/{{ ped.id_pedido }}/estado" style="display:inline">
+                                    <select name="estado" class="form-select form-select-sm" style="display:inline-block;width:auto">
+                                        <option value="pendiente" {% if ped.estado == 'pendiente' %}selected{% endif %}>Pendiente</option>
+                                        <option value="confirmado" {% if ped.estado == 'confirmado' %}selected{% endif %}>Confirmado</option>
+                                        <option value="preparando" {% if ped.estado == 'preparando' %}selected{% endif %}>Preparando</option>
+                                        <option value="listo" {% if ped.estado == 'listo' %}selected{% endif %}>Listo</option>
+                                        <option value="entregado" {% if ped.estado == 'entregado' %}selected{% endif %}>Entregado</option>
+                                        <option value="cancelado" {% if ped.estado == 'cancelado' %}selected{% endif %}>Cancelado</option>
+                                    </select>
+                                    <button class="btn btn-sm btn-outline-warning" type="submit" title="Actualizar"><i class="fa fa-sync"></i></button>
+                                </form>
+                                {% endif %}
+                                {% if ped.url_whatsapp_pedido %}
+                                <a href="{{ ped.url_whatsapp_pedido }}" target="_blank" rel="noopener noreferrer"
+                                    class="btn btn-sm btn-success" title="Notificar al cliente por WhatsApp">
+                                        <i class="fa-brands fa-whatsapp"></i>
+                                </a>
+                                {% endif %}
+                            </div>
+                        </td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="6" class="text-center py-5 text-muted">
+                            <i class="fa fa-receipt fa-2x mb-2 d-block"></i>
+                            No se encontraron pedidos
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+{% endblock %}

@@ -1,0 +1,193 @@
+{% extends 'base.html' %}
+{% block titulito %}Detalle Pedido – Cleoferr{% endblock %}
+{% block contenido %}
+
+<style>
+.detalle-header {
+    background: linear-gradient(135deg, var(--gris-oscuro), var(--naranja-oscuro));
+    color: white; padding: 20px 28px; border-radius: 12px;
+    margin-bottom: 24px; display: flex; align-items: center; justify-content: space-between;
+}
+.detalle-header h2 { margin: 0; font-weight: 700; font-size: 1.4rem; }
+
+/* Timeline fases */
+.fases-bar { display: flex; align-items: center; gap: 0; margin-bottom: 28px; flex-wrap: wrap; }
+.fase-step { flex: 1; text-align: center; position: relative; min-width: 80px; }
+.fase-step::before {
+    content: ''; position: absolute; top: 19px; left: 50%; width: 100%; height: 3px;
+    background: #ddd; z-index: 0;
+}
+.fase-step:last-child::before { display: none; }
+.fase-step.hecha::before { background: #28a745; }
+/* activa::before intentionally NOT colored — only completed steps color the line forward */
+.fase-circulo {
+    width: 40px; height: 40px; border-radius: 50%;
+    background: #f0f0f0; border: 3px solid #ddd; color: #bbb;
+    display: flex; align-items: center; justify-content: center;
+    margin: 0 auto 6px; font-size: 1rem; position: relative; z-index: 1;
+}
+.fase-step.hecha .fase-circulo { background: #28a745; border-color: #28a745; color: white; }
+.fase-step.activa .fase-circulo { background: var(--naranja); border-color: var(--naranja); color: white; box-shadow: 0 0 0 4px rgba(232,88,10,0.2); }
+.fase-nombre { font-size: 0.72rem; font-weight: 700; color: #aaa; text-transform: uppercase; }
+.fase-step.activa .fase-nombre { color: var(--naranja); }
+.fase-step.hecha .fase-nombre { color: #28a745; }
+.btn-fase {
+    border: 2px solid #ddd; border-radius: 8px; padding: 8px 14px;
+    background: white; cursor: pointer; font-size: 0.82rem; font-weight: 600;
+    color: #666; transition: all 0.2s;
+}
+.btn-fase:hover { border-color: var(--naranja); color: var(--naranja); }
+.btn-fase.activo { background: var(--naranja); color: white; border-color: var(--naranja); }
+</style>
+
+<div class="detalle-header">
+    <div>
+        <h2><i class="fa fa-receipt me-2"></i>Pedido #{{ pedido.id_venta if pedido else id }}</h2>
+        <p style="margin:4px 0 0;opacity:0.8;font-size:0.88rem">
+            {% if pedido %}
+                {{ pedido.fecha.strftime('%d/%m/%Y %H:%M') if pedido.fecha else '' }} ·
+                Cliente: {{ pedido.cliente_nombre or '–' }}
+            {% endif %}
+        </p>
+    </div>
+    <a href="/pedidos" class="btn btn-outline-light btn-sm">
+        <i class="fa fa-arrow-left me-1"></i>Volver
+    </a>
+</div>
+
+{% if pedido %}
+<!-- Barra de fases (editable por vendedor/admin) -->
+<div class="card card-custom mb-3">
+    <div class="card-body">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <h6 class="fw-bold mb-0"><i class="fa fa-tasks me-2"></i>Estado del pedido</h6>
+            <span class="badge
+                {% if pedido.estado == 'pendiente' %}bg-warning text-dark
+                {% elif pedido.estado == 'confirmado' %}bg-info
+                {% elif pedido.estado == 'preparando' %}bg-primary
+                {% elif pedido.estado == 'listo' %}bg-success
+                {% elif pedido.estado == 'entregado' %}bg-dark
+                {% else %}bg-secondary{% endif %} px-3 py-2" style="font-size:0.85rem">
+                {{ (pedido.estado or 'pendiente')|upper }}
+            </span>
+        </div>
+
+        <!-- Timeline visual -->
+        <div class="fases-bar mb-4">
+            {% set estado_actual = pedido.estado or 'pendiente' %}
+            {% for fase in fases_orden %}
+                {% set idx_fase = loop.index0 %}
+                <div class="fase-step {% if idx_fase < idx_actual %}hecha{% elif idx_fase == idx_actual %}activa{% endif %}">
+                    <div class="fase-circulo">
+                        {% if idx_fase < idx_actual %}
+                            <i class="fa fa-check"></i>
+                        {% elif fase == 'pendiente' %}<i class="fa fa-clock"></i>
+                        {% elif fase == 'confirmado' %}<i class="fa fa-check-circle"></i>
+                        {% elif fase == 'preparando' %}<i class="fa fa-box"></i>
+                        {% elif fase == 'listo' %}<i class="fa fa-store"></i>
+                        {% elif fase == 'entregado' %}<i class="fa fa-handshake"></i>
+                        {% endif %}
+                    </div>
+                    <div class="fase-nombre">{{ fase }}</div>
+                </div>
+            {% endfor %}
+        </div>
+
+        <!-- Botones para cambiar fase (vendedor/admin) -->
+        <div class="d-flex flex-wrap gap-2 align-items-center">
+            <span class="fw-semibold" style="font-size:0.85rem">Cambiar a:</span>
+            {% for fase in ['pendiente','confirmado','preparando','listo','entregado'] %}
+            <form method="POST" action="/pedidos/{{ pedido.id_venta }}/estado" style="display:inline">
+                <input type="hidden" name="estado" value="{{ fase }}">
+                <button type="submit" class="btn-fase {% if pedido.estado == fase %}activo{% endif %}">
+                    {% if fase == 'pendiente' %}<i class="fa fa-clock me-1"></i>
+                    {% elif fase == 'confirmado' %}<i class="fa fa-check-circle me-1"></i>
+                    {% elif fase == 'preparando' %}<i class="fa fa-box me-1"></i>
+                    {% elif fase == 'listo' %}<i class="fa fa-store me-1"></i>
+                    {% elif fase == 'entregado' %}<i class="fa fa-handshake me-1"></i>
+                    {% endif %}{{ fase|capitalize }}
+                </button>
+            </form>
+            {% endfor %}
+        </div>
+    </div>
+</div>
+
+<!-- Info del pedido -->
+<div class="row g-3 mb-3">
+    <div class="col-md-6">
+        <div class="card card-custom h-100">
+            <div class="card-body">
+                <h6 class="fw-bold mb-3"><i class="fa fa-user me-2" style="color:var(--naranja)"></i>Datos del cliente</h6>
+                <table class="table table-sm mb-0" style="font-size:0.88rem">
+                    <tr><td class="text-muted fw-semibold" width="40%">Cliente</td><td>{{ pedido.cliente_nombre or '–' }}</td></tr>
+                    <tr><td class="text-muted fw-semibold">Teléfono</td><td>{{ pedido.cliente_telefono or '–' }}</td></tr>
+                    <tr><td class="text-muted fw-semibold">Responsable</td><td>{{ pedido.responsable or '–' }}</td></tr>
+                    <tr><td class="text-muted fw-semibold">Tipo</td><td>{{ pedido.tipo_venta or 'online' }}</td></tr>
+                </table>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-6">
+        <div class="card card-custom h-100">
+            <div class="card-body">
+                <h6 class="fw-bold mb-3"><i class="fa fa-file-invoice me-2" style="color:var(--naranja)"></i>Comprobante</h6>
+                {% if comprobante %}
+                <table class="table table-sm mb-0" style="font-size:0.88rem">
+                    <tr><td class="text-muted fw-semibold" width="40%">Tipo</td><td>{{ comprobante.tipo|capitalize }} {{ comprobante.tipo_boleta or '' }}</td></tr>
+                    <tr><td class="text-muted fw-semibold">Número</td><td>{{ comprobante.numero or '–' }}</td></tr>
+                    {% if comprobante.ruc_cliente %}<tr><td class="text-muted fw-semibold">RUC</td><td>{{ comprobante.ruc_cliente }}</td></tr>{% endif %}
+                    <tr><td class="text-muted fw-semibold">Fecha</td><td>{{ comprobante.fecha_emision.strftime('%d/%m/%Y') if comprobante.fecha_emision else '–' }}</td></tr>
+                </table>
+                {% else %}
+                <p class="text-muted mb-0" style="font-size:0.88rem">Sin comprobante generado</p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+{% else %}
+<div class="alert alert-warning">Pedido no encontrado.</div>
+{% endif %}
+
+<!-- Tabla de ítems -->
+<div class="card card-custom">
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <span><i class="fa fa-list me-2"></i>Ítems del pedido</span>
+        {% if pedido %}
+        <span class="fw-bold" style="color:var(--naranja)">
+            Total: S/ {{ "%.2f"|format(pedido.total|float) if pedido.total else '0.00' }}
+        </span>
+        {% endif %}
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-custom mb-0">
+                <thead>
+                    <tr>
+                        <th>Producto</th>
+                        <th>Cantidad</th>
+                        <th>Precio Unit.</th>
+                        <th>Subtotal</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for it in items %}
+                    <tr>
+                        <td>{{ it.producto_nombre or it.nombre or it.id_producto }}</td>
+                        <td>{{ it.cantidad }}</td>
+                        <td>S/ {{ "%.2f"|format(it.precio_unitario|float) if it.precio_unitario else '0.00' }}</td>
+                        <td class="fw-semibold">S/ {{ "%.2f"|format((it.precio_unitario|float)*(it.cantidad|int)) }}</td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="4" class="text-center py-4 text-muted">No hay ítems registrados</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+{% endblock %}

@@ -1,0 +1,158 @@
+{% extends 'base.html' %}
+{% block titulito %}Mis Pedidos – Cleoferr{% endblock %}
+{% block contenido %}
+
+<style>
+.pedidos-header {
+    background: linear-gradient(135deg, var(--gris-oscuro), var(--azul-oscuro));
+    color: white; padding: 20px 28px; border-radius: 12px;
+    margin-bottom: 24px; display: flex;
+    align-items: center; justify-content: space-between;
+}
+.pedidos-header h2 { margin: 0; font-weight: 700; font-size: 1.5rem; }
+/* Timeline fases — mismo estilo que pedido_detalle */
+.fases-bar { display: flex; align-items: center; gap: 0; margin-bottom: 14px; flex-wrap: wrap; }
+.fase-step { flex: 1; text-align: center; position: relative; min-width: 72px; }
+.fase-step::before {
+    content: ''; position: absolute; top: 17px; left: 50%; width: 100%; height: 3px;
+    background: #ddd; z-index: 0;
+}
+.fase-step:last-child::before { display: none; }
+.fase-step.hecha::before { background: #28a745; }
+.fase-circulo {
+    width: 36px; height: 36px; border-radius: 50%;
+    background: #f0f0f0; border: 3px solid #ddd; color: #bbb;
+    display: flex; align-items: center; justify-content: center;
+    margin: 0 auto 4px; font-size: 0.85rem; position: relative; z-index: 1;
+}
+.fase-step.hecha .fase-circulo { background: #28a745; border-color: #28a745; color: white; }
+.fase-step.activa .fase-circulo { background: var(--naranja); border-color: var(--naranja); color: white; box-shadow: 0 0 0 4px rgba(232,88,10,0.2); }
+.fase-nombre { font-size: 0.68rem; font-weight: 700; color: #aaa; text-transform: uppercase; }
+.fase-step.activa .fase-nombre { color: var(--naranja); }
+.fase-step.hecha .fase-nombre { color: #28a745; }
+.pedido-card {
+    background: white; border-radius: 12px;
+    box-shadow: 0 2px 14px rgba(0,0,0,0.07);
+    margin-bottom: 18px; overflow: hidden;
+}
+.pedido-card-header {
+    background: var(--gris-oscuro); color: white;
+    padding: 12px 20px; display: flex;
+    justify-content: space-between; align-items: center;
+}
+.pedido-card-body { padding: 18px 20px; }
+.badge-estado {
+    padding: 5px 14px; border-radius: 20px;
+    font-size: 0.8rem; font-weight: 700; letter-spacing: 0.5px;
+}
+.badge-pendiente   { background: #fff3cd; color: #856404; }
+.badge-confirmado  { background: #cfe2ff; color: #084298; }
+.badge-preparando  { background: #fff3cd; color: #664d03; }
+.badge-listo       { background: #d1e7dd; color: #0f5132; }
+.badge-entregado   { background: #28a745; color: white; }
+.badge-cancelado   { background: #f8d7da; color: #842029; }
+.item-row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #f0f0f0; font-size: 0.9rem; }
+.item-row:last-child { border-bottom: none; }
+.vacio-wrap { text-align: center; padding: 80px 20px; color: #bbb; }
+.vacio-wrap i { font-size: 4rem; display: block; margin-bottom: 16px; color: #ddd; }
+.vacio-wrap h4 { color: #aaa; font-weight: 700; }
+.vacio-wrap a { color: var(--azul); font-weight: 700; }
+</style>
+
+<div class="pedidos-header">
+    <div>
+        <h2><i class="fa fa-box me-2"></i>Mis Pedidos</h2>
+        <p style="margin:4px 0 0;opacity:0.8;font-size:0.9rem">Revisa el estado de tus pedidos en tiempo real</p>
+    </div>
+    <a href="/catalogo" class="btn btn-outline-light">
+        <i class="fa fa-arrow-left me-1"></i> Seguir comprando
+    </a>
+</div>
+
+{% if not pedidos %}
+<div class="vacio-wrap">
+    <i class="fa fa-box-open"></i>
+    <h4>Aún no tienes pedidos</h4>
+    <p>Cuando realices una compra aparecerá aquí con su estado actualizado.</p>
+    <a href="/catalogo" class="btn btn-naranja mt-2">
+        <i class="fa fa-shopping-cart me-1"></i> Ver catálogo
+    </a>
+</div>
+{% else %}
+{% for ped in pedidos %}
+{% set estado = ped.estado or 'pendiente' %}
+{% set idx_actual = ped.idx_actual %}
+
+<div class="pedido-card">
+    <div class="pedido-card-header">
+        <span><i class="fa fa-receipt me-2"></i>Pedido #{{ ped.id_venta }}</span>
+        <span class="badge-estado badge-{{ estado }}">
+            {{ estado | capitalize }}
+        </span>
+    </div>
+    <div class="pedido-card-body">
+        <!-- Stepper de estado -->
+        {% if estado != 'cancelado' %}
+        {% set fases_orden = ['pendiente', 'confirmado', 'preparando', 'listo', 'entregado'] %}
+        <div class="fases-bar mb-3">
+            {% for fase in fases_orden %}
+            {% set idx_fase = loop.index0 %}
+            <div class="fase-step {% if idx_fase < idx_actual %}hecha{% elif idx_fase == idx_actual %}activa{% endif %}">
+                <div class="fase-circulo">
+                    {% if idx_fase < idx_actual %}
+                        <i class="fa fa-check"></i>
+                    {% elif fase == 'pendiente' %}<i class="fa fa-clock"></i>
+                    {% elif fase == 'confirmado' %}<i class="fa fa-check-circle"></i>
+                    {% elif fase == 'preparando' %}<i class="fa fa-box"></i>
+                    {% elif fase == 'listo' %}<i class="fa fa-store"></i>
+                    {% elif fase == 'entregado' %}<i class="fa fa-handshake"></i>
+                    {% endif %}
+                </div>
+                <div class="fase-nombre">{{ fase }}</div>
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="alert alert-danger py-2 mb-3" style="font-size:0.88rem">
+            <i class="fa fa-ban me-2"></i>Este pedido fue cancelado.
+        </div>
+        {% endif %}
+
+        <div class="row g-3">
+            <div class="col-md-6">
+                <div style="font-size:0.82rem;color:#888;margin-bottom:6px"><i class="fa fa-calendar me-1"></i>Fecha</div>
+                <strong>{{ ped.fecha_peru.strftime('%d/%m/%Y %H:%M') if ped.fecha_peru else '–' }}</strong>
+            </div>
+            <div class="col-md-6 text-md-end">
+                <div style="font-size:0.82rem;color:#888;margin-bottom:6px">Total</div>
+                <strong style="font-size:1.1rem;color:var(--azul)">S/ {{ "%.2f"|format(ped.total|float) }}</strong>
+            </div>
+        </div>
+
+        {% if ped.get('items') %}
+        <div class="mt-3">
+            <div style="font-size:0.82rem;color:#888;margin-bottom:8px"><i class="fa fa-box me-1"></i>Productos</div>
+            {% for it in ped.get('items') %}
+            <div class="item-row">
+                <span>{{ it.producto_nombre or '–' }} × {{ it.cantidad }}</span>
+                <span class="fw-semibold">S/ {{ "%.2f"|format((it.precio_unitario or 0)|float * (it.cantidad or 1)|float) }}</span>
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+
+        <div class="mt-3" style="font-size:0.82rem;color:#888;text-align:right">
+            <i class="fa fa-info-circle me-1"></i>
+            El estado se actualiza en tiempo real según el avance de tu pedido.
+        </div>
+    </div>
+</div>
+{% endfor %}
+{% endif %}
+
+<script>
+// Auto-refrescar cada 60 segundos para mantener estados actualizados
+setTimeout(() => location.reload(), 60000);
+</script>
+
+{% endblock %}
