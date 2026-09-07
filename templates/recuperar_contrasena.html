@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cleoferr – Recuperar contraseña</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        :root {
+            --azul: #4682B4;
+            --azul-oscuro: #2E5E85;
+            --azul-claro: #6BA8DF;
+            --gris-oscuro: #1A1A2E;
+        }
+        body {
+            margin: 0; min-height: 100vh;
+            background: linear-gradient(135deg, #0f3460 0%, #16213e 50%, var(--azul) 100%);
+            display: flex; align-items: center; justify-content: center;
+        }
+        .login-wrapper { width: 100%; max-width: 480px; padding: 20px; }
+        .login-card { background: white; border-radius: 20px; box-shadow: 0 20px 60px rgba(0,0,0,0.4); overflow: hidden; }
+        .login-header {
+            background: linear-gradient(135deg, var(--azul), var(--azul-claro));
+            color: white; text-align: center; padding: 30px 20px;
+        }
+        .login-header .logo-wrap {
+            width: 70px; height: 70px; background: rgba(255,255,255,0.12);
+            border-radius: 50%; margin: 0 auto 12px; display: flex;
+            align-items: center; justify-content: center; font-size: 1.8rem;
+            border: 3px solid rgba(255,255,255,0.35);
+        }
+        .login-header h2 { margin: 0; font-weight: 800; font-size: 1.6rem; }
+        .login-header p { margin: 6px 0 0; opacity: 0.85; font-size: 0.88rem; }
+        .contenido { padding: 28px; }
+        .form-label { font-weight: 600; color: #333; font-size: 0.85rem; }
+        .form-control { border-radius: 8px; padding: 10px 14px; border: 2px solid #e0e0e0; font-size: 0.9rem; }
+        .form-control:focus { border-color: var(--azul); box-shadow: 0 0 0 0.2rem rgba(70,130,180,0.15); }
+        .input-group-custom { position: relative; }
+        .input-group-custom .icon-left {
+            position: absolute; left: 13px; top: 50%; transform: translateY(-50%);
+            color: #aaa; z-index: 5; pointer-events: none;
+        }
+        .input-group-custom .form-control { padding-left: 38px; }
+        .btn-accion {
+            background: linear-gradient(135deg, var(--azul), var(--azul-claro));
+            border: none; color: white; font-weight: 700; font-size: 0.95rem;
+            padding: 12px; border-radius: 10px; width: 100%;
+        }
+        .btn-accion:hover { background: linear-gradient(135deg, var(--azul-oscuro), var(--azul)); color: white; }
+        .alert-error {
+            background: #fff3f3; border: 1px solid #ffcccc; color: #d32f2f;
+            border-radius: 8px; padding: 10px; margin-bottom: 16px; font-size: 0.88rem;
+        }
+        .code-input {
+            text-align: center; font-size: 2rem; font-weight: 800;
+            letter-spacing: 12px; border: 3px solid #ddd; border-radius: 12px;
+            padding: 16px; width: 100%;
+        }
+        .code-input:focus { border-color: var(--azul); outline: none; box-shadow: 0 0 0 0.2rem rgba(70,130,180,0.15); }
+    </style>
+</head>
+<body>
+<div class="login-wrapper">
+    <div class="login-card">
+        <div class="login-header">
+            <div class="logo-wrap"><i class="fa fa-key"></i></div>
+            <h2>Recuperar contraseña</h2>
+            <p>Ferretería Inversiones CLEOFERR</p>
+        </div>
+
+        <div class="contenido">
+            {% if error %}
+                <div class="alert-error"><i class="fa fa-exclamation-circle me-2"></i>{{ error }}</div>
+            {% endif %}
+
+            {% if verificar_activo %}
+            <!-- PASO 2: código + nueva contraseña -->
+            {% if aviso_smtp %}
+                <div style="background:#fffbea;border:1px solid #f59e0b;color:#78350f;border-radius:8px;padding:10px;margin-bottom:16px;font-size:0.88rem">
+                    <i class="fa fa-triangle-exclamation me-2"></i>
+                    <strong>Modo desarrollo:</strong> El correo SMTP no está configurado.<br>
+                    Tu código es: <strong style="font-size:1.4rem;letter-spacing:6px;color:#1d4ed8">{{ codigo_visible }}</strong>
+                </div>
+            {% endif %}
+            <div style="text-align:center;margin-bottom:20px">
+                <i class="fa fa-envelope-open-text fa-3x" style="color:var(--azul);margin-bottom:12px;display:block"></i>
+                <p style="font-size:0.88rem;color:#666">
+                    Si el correo existe en el sistema, te enviamos un código de 6 dígitos a<br>
+                    <strong>{{ correo_verificar }}</strong>
+                </p>
+            </div>
+            <form method="POST" action="/restablecer_contrasena">
+                <input type="hidden" name="correo" value="{{ correo_verificar }}">
+                <div class="mb-3">
+                    <label class="form-label text-center d-block">Código de verificación</label>
+                    <input type="text" name="codigo" class="code-input"
+                           placeholder="000000" maxlength="6" pattern="[0-9]{6}"
+                           inputmode="numeric" autocomplete="one-time-code" required autofocus>
+                    <div style="font-size:0.78rem;color:#888;text-align:center;margin-top:8px">
+                        <i class="fa fa-clock me-1"></i>Válido por 10 minutos
+                    </div>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Nueva contraseña</label>
+                    <div class="input-group-custom">
+                        <i class="fa fa-lock icon-left"></i>
+                        <input type="password" name="nueva" class="form-control"
+                               placeholder="Mínimo 6 caracteres" required minlength="6">
+                    </div>
+                </div>
+                <div class="mb-4">
+                    <label class="form-label">Confirmar contraseña</label>
+                    <div class="input-group-custom">
+                        <i class="fa fa-lock icon-left"></i>
+                        <input type="password" name="confirmar" class="form-control"
+                               placeholder="Repite la contraseña" required minlength="6">
+                    </div>
+                </div>
+                <button type="submit" class="btn-accion">
+                    <i class="fa fa-check-circle me-2"></i>Restablecer contraseña
+                </button>
+            </form>
+            {% else %}
+            <!-- PASO 1: pedir correo -->
+            <p style="font-size:0.9rem;color:#555;text-align:center;margin-bottom:20px">
+                Ingresa tu correo registrado y te enviaremos un código para restablecer tu contraseña.
+            </p>
+            <form method="POST" action="/recuperar_contrasena">
+                <div class="mb-4">
+                    <label class="form-label">Correo electrónico</label>
+                    <div class="input-group-custom">
+                        <i class="fa fa-envelope icon-left"></i>
+                        <input type="email" name="correo" class="form-control"
+                               placeholder="tu@correo.com" required autofocus>
+                    </div>
+                </div>
+                <button type="submit" class="btn-accion">
+                    <i class="fa fa-paper-plane me-2"></i>Enviar código
+                </button>
+            </form>
+            {% endif %}
+
+            <div style="text-align:center;margin-top:16px;font-size:0.83rem">
+                <a href="/login_cliente" style="color:var(--azul);font-weight:600;text-decoration:none">
+                    <i class="fa fa-arrow-left me-1"></i>Volver al acceso de clientes
+                </a>
+                &nbsp;·&nbsp;
+                <a href="/login" style="color:var(--azul);font-weight:600;text-decoration:none">
+                    Acceso personal
+                </a>
+            </div>
+        </div>
+    </div>
+</div>
+<script>
+// Solo números en el campo de código
+document.querySelector('.code-input') && document.querySelector('.code-input').addEventListener('input', function() {
+    this.value = this.value.replace(/[^0-9]/g, '').slice(0, 6);
+});
+</script>
+</body>
+</html>

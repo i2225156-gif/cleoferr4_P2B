@@ -1807,6 +1807,194 @@ def verificar_registro():
         conn.close()
 
 
+# ── Recuperación de contraseña ──────────────────────────────
+def _buscar_cuenta_por_correo(cursor, correo):
+    """Busca el correo en usuario y en cliente (BD Auth).
+    Devuelve (tipo, dict) donde tipo es 'usuario' o 'cliente', o (None, None)."""
+    cursor.execute("SELECT id_usuario, nombres FROM usuario WHERE email = %s", (correo,))
+    u = cursor.fetchone()
+    if u:
+        return 'usuario', u
+    cursor.execute("SELECT id_cliente, nombre FROM cliente WHERE email = %s", (correo,))
+    c = cursor.fetchone()
+    if c:
+        return 'cliente', c
+    return None, None
+
+
+@app.route('/recuperar_contrasena', methods=['GET', 'POST'])
+def recuperar_contrasena():
+    """Paso 1: el usuario ingresa su correo y recibe un código OTP de 6 dígitos."""
+    import random
+
+    if request.method == 'GET':
+        return render_template('recuperar_contrasena.html')
+
+    correo = request.form.get('correo', '').strip()
+    if not correo:
+        return render_template('recuperar_contrasena.html',
+                               error='Ingresa tu correo electrónico.')
+
+    conn   = get_connection_auth()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        tipo, cuenta = _buscar_cuenta_por_correo(cursor, correo)
+        if not cuenta:
+            # Mensaje genérico para no revelar si el correo existe o no
+            return render_template('recuperar_contrasena.html',
+                                   verificar_activo=True, correo_verificar=correo)
+
+        nombre = cuenta.get('nombres') or cuenta.get('nombre') or correo
+        codigo = str(random.randint(100000, 999999))
+        codigo_hash = bcrypt.generate_password_hash(codigo).decode('utf-8')
+
+        id_usuario = cuenta['id_usuario'] if tipo == 'usuario' else None
+        id_cliente = cuenta['id_cliente'] if tipo == 'cliente' else None
+
+        # Invalidar códigos anteriores de esta cuenta
+        cursor.execute("""
+            UPDATE recuperacion_contrasena SET usado = TRUE
+            WHERE COALESCE(id_usuario, -1) = COALESCE(%s, -1)
+              AND COALESCE(id_cliente, -1) = COALESCE(%s, -1)
+              AND usado = FALSE
+        """, (id_usuario, id_cliente))
+        cursor.execute("""
+            INSERT INTO recuperacion_contrasena
+                (id_usuario, id_cliente, codigo_hash, creado_en, expira_en, usado, ip_solicitud)
+            VALUES (%s, %s, %s, NOW(), NOW() + INTERVAL '10 minutes', FALSE, %s)
+        """, (id_usuario, id_cliente, codigo_hash, request.remote_addr))
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        app.logger.error(f"Error en recuperar_contrasena: {e}")
+        return render_template('recuperar_contrasena.html',
+                               error='No se pudo procesar la solicitud. Intenta de nuevo.')
+    finally:
+        conn.close()
+
+    resultado = enviar_correo(
+        correo,
+        f'Tu código para recuperar tu contraseña CLEOFERR: {codigo}',
+        _correo_html_codigo(nombre, codigo, 'Tu código para restablecer tu contraseña es:'),
+        f"Hola {nombre},\n\nTu código para recuperar tu contraseña es: {codigo}\n\nVálido por 10 minutos."
+    )
+    if resultado == 'smtp_no_configurado':
+        return render_template('recuperar_contrasena.html',
+                               verificar_activo=True, correo_verificar=correo,
+                               codigo_visible=codigo, aviso_smtp=True)
+    if resultado == 'smtp_auth':
+        return render_template('recuperar_contrasena.html',
+                               error='Error de autenticación con el correo. Contacta al administrador.')
+    if resultado:
+        return render_template('recuperar_contrasena.html',
+                               error='No se pudo enviar el correo. Intenta de nuevo.')
+
+    return render_template('recuperar_contrasena.html',
+                           verificar_activo=True, correo_verificar=correo)
+
+
+@app.route('/restablecer_contrasena', methods=['POST'])
+def restablecer_contrasena():
+    """Paso 2: valida el OTP y cambia la contraseña (usuario o cliente)."""
+    correo     = request.form.get('correo', '').strip()
+    codigo     = request.form.get('codigo', '').strip()
+    nueva      = request.form.get('nueva', '')
+    confirmar  = request.form.get('confirmar', '')
+
+    def _reenviar_con_error(msg):
+        return render_template('recuperar_contrasena.html',
+                               error=msg, verificar_activo=True,
+                               correo_verificar=correo)
+
+    if not correo or not codigo or not nueva:
+        return _reenviar_con_error('Todos los campos son obligatorios.')
+    if nueva != confirmar:
+        return _reenviar_con_error('Las contraseñas no coinciden.')
+    if len(nueva) < 6:
+        return _reenviar_con_error('La contraseña debe tener al menos 6 caracteres.')
+
+    conn   = get_connection_auth()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        tipo, cuenta = _buscar_cuenta_por_correo(cursor, correo)
+        if not cuenta:
+            return _reenviar_con_error('Solicitud no válida. Vuelve a solicitar el código.')
+
+        id_usuario = cuenta['id_usuario'] if tipo == 'usuario' else None
+        id_cliente = cuenta['id_cliente'] if tipo == 'cliente' else None
+
+        cursor.execute("""
+            SELECT id_recuperacion, codigo_hash, expira_en, intentos_fallidos
+            FROM recuperacion_contrasena
+            WHERE COALESCE(id_usuario, -1) = COALESCE(%s, -1)
+              AND COALESCE(id_cliente, -1) = COALESCE(%s, -1)
+              AND usado = FALSE
+            ORDER BY creado_en DESC LIMIT 1
+        """, (id_usuario, id_cliente))
+        rec = cursor.fetchone()
+
+        if not rec:
+            return _reenviar_con_error('No hay un código activo. Solicita uno nuevo.')
+
+        from datetime import datetime, timezone
+        if rec['expira_en'] < datetime.now(timezone.utc):
+            return _reenviar_con_error('El código expiró. Solicita uno nuevo.')
+
+        if rec['intentos_fallidos'] >= 5:
+            cursor.execute("UPDATE recuperacion_contrasena SET usado = TRUE WHERE id_recuperacion = %s",
+                           (rec['id_recuperacion'],))
+            conn.commit()
+            return render_template('recuperar_contrasena.html',
+                                   error='Demasiados intentos fallidos. Solicita un nuevo código.')
+
+        try:
+            coincide = bcrypt.check_password_hash(rec['codigo_hash'], codigo)
+        except (ValueError, TypeError):
+            coincide = False
+
+        if not coincide:
+            intentos = rec['intentos_fallidos'] + 1
+            cursor.execute("""
+                UPDATE recuperacion_contrasena
+                SET intentos_fallidos = %s, usado = (CASE WHEN %s >= 5 THEN TRUE ELSE usado END)
+                WHERE id_recuperacion = %s
+            """, (intentos, intentos, rec['id_recuperacion']))
+            conn.commit()
+            if intentos >= 5:
+                return render_template('recuperar_contrasena.html',
+                                       error='Demasiados intentos fallidos. Solicita un nuevo código.')
+            return _reenviar_con_error(f'Código incorrecto. Te quedan {5 - intentos} intentos.')
+
+        # Código correcto: cambiar contraseña y marcar código como usado
+        nuevo_hash = bcrypt.generate_password_hash(nueva).decode('utf-8')
+        if tipo == 'usuario':
+            cursor.execute("""
+                UPDATE usuario SET contrasena = %s, fecha_ultimo_cambio_pwd = NOW()
+                WHERE id_usuario = %s
+            """, (nuevo_hash, id_usuario))
+        else:
+            cursor.execute("""
+                UPDATE cliente SET contrasena = %s, fecha_ultimo_cambio_pwd = NOW()
+                WHERE id_cliente = %s
+            """, (nuevo_hash, id_cliente))
+        cursor.execute("UPDATE recuperacion_contrasena SET usado = TRUE WHERE id_recuperacion = %s",
+                       (rec['id_recuperacion'],))
+        conn.commit()
+
+        # Volver al login correspondiente
+        if tipo == 'usuario':
+            return render_template('login.html',
+                                   success='Contraseña actualizada. Inicia sesión con tu nueva clave.')
+        return render_template('login_cliente.html',
+                               success='Contraseña actualizada. Inicia sesión con tu nueva clave.')
+    except Exception as e:
+        conn.rollback()
+        app.logger.error(f"Error en restablecer_contrasena: {e}")
+        return _reenviar_con_error('Error al actualizar la contraseña. Intenta de nuevo.')
+    finally:
+        conn.close()
+
+
 @app.route('/mis_pedidos')
 def mis_pedidos():
     """Historial de pedidos del cliente con estado actualizado."""
