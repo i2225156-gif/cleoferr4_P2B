@@ -144,7 +144,7 @@
                 <label class="form-label fw-semibold">Email *</label>
                 <input type="email" name="email" class="form-control"
                        value="{{ cliente.email if cliente else '' }}"
-                       required placeholder="correo@ejemplo.com">
+                       {% if not (cliente and not cliente.email) %}required{% endif %} placeholder="correo@ejemplo.com">
             </div>
 
             <!-- ── Teléfono ── -->

@@ -74,7 +74,9 @@
                         <td class="fw-semibold">S/ {{ "%.2f"|format(ped.total|float) if ped.total else '0.00' }}</td>
                         <td style="min-width:150px">
                             <div class="d-flex align-items-center gap-2">
-                                {% if ped.estado == 'cancelado' %}
+                                {% if ped.es_local_entregado %}
+                                <span class="badge badge-activo"><i class="fa fa-store me-1"></i>ENTREGADO · Venta local</span>
+                                {% elif ped.estado == 'cancelado' %}
                                 <span class="badge bg-danger">{{ ped.estado }}</span>
                                 <div class="progress-steps" style="display:inline-flex;align-items:center;gap:2px">
                                     {% for s in range(5) %}
@@ -83,7 +85,7 @@
                                     {% endfor %}
                                 </div>
                                 {% else %}
-                                <span class="badge {% if ped.estado == 'entregado' %}badge-activo{% elif ped.estado == 'pendiente' %}badge-inactivo{% else %}badge-salida{% endif %}">
+                                <span class="badge {% if ped.estado == 'entregado' %}badge-activo{% elif ped.estado == 'pendiente' %}badge-inactivo{% else %}badge-salida{% endif %}" data-estado>
                                     {{ ped.estado }}
                                 </span>
                                 <div class="progress-steps" style="display:inline-flex;align-items:center;gap:2px">
@@ -106,16 +108,20 @@
                             </div>
                         </td>
                         <td>
-                            <div class="d-flex gap-1">
+                            <div class="d-flex gap-1 align-items-center">
                                 <a href="/pedidos/detalle/{{ ped.id_pedido }}" class="btn btn-sm btn-outline-info" title="Ver detalle"><i class="fa fa-eye"></i></a>
-                                {% if session.rol in ['administrador', 'vendedor'] %}
-                                <form method="POST" action="/pedidos/{{ ped.id_pedido }}/estado" style="display:inline">
-                                    <select name="estado" class="form-select form-select-sm" style="display:inline-block;width:auto">
+                                {% if ped.es_local_entregado %}
+                                <span class="badge badge-activo" title="Pago confirmado y producto entregado en mostrador">
+                                    <i class="fa fa-check-circle me-1"></i>Completada
+                                </span>
+                                {% elif session.rol in ['administrador', 'vendedor'] %}
+                                <form method="POST" action="/pedidos/{{ ped.id_pedido }}/estado" data-pedido-form data-pedido-id="{{ ped.id_pedido }}" style="display:inline">
+                                    <select name="estado" class="form-select form-select-sm form-select-estado" style="display:inline-block;width:auto"
+                                            data-pedido-id="{{ ped.id_pedido }}" data-estado-actual="{{ ped.estado }}">
                                         {% for e in estados %}
                                         <option value="{{ e }}" {% if ped.estado == e %}selected{% endif %}>{{ e|capitalize }}</option>
                                         {% endfor %}
                                     </select>
-                                    <button class="btn btn-sm btn-outline-warning" type="submit" title="Actualizar"><i class="fa fa-sync"></i></button>
                                 </form>
                                 {% endif %}
                                 {% if ped.url_whatsapp_pedido %}
@@ -140,5 +146,67 @@
         </div>
     </div>
 </div>
+
+<script>
+// Actualización de estado vía AJAX con feedback visible (toast)
+function mostrarToast(mensaje, tipo) {
+    var previo = document.getElementById('toast-estado');
+    if (previo) previo.remove();
+    var el = document.createElement('div');
+    el.id = 'toast-estado';
+    el.style.cssText = 'position:fixed;top:20px;right:20px;z-index:9999;padding:12px 18px;border-radius:8px;color:#fff;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.3);font-size:0.9rem;max-width:320px';
+    el.style.background = tipo === 'error' ? '#d9534f' : '#28a745';
+    el.textContent = mensaje;
+    document.body.appendChild(el);
+    setTimeout(function () { el.remove(); }, 4000);
+}
+
+document.querySelectorAll('.form-select-estado').forEach(function (sel) {
+    sel.addEventListener('change', function () {
+        var form  = this.closest('form[data-pedido-form]');
+        var id    = this.getAttribute('data-pedido-id');
+        var anterior = this.getAttribute('data-estado-actual');
+        var nuevo = this.value;
+        this.disabled = true;
+        var fd = new FormData();
+        fd.append('estado', nuevo);
+        fetch(form.getAttribute('action'), {
+            method: 'POST',
+            headers: { 'X-Requested-With': 'XMLHttpRequest' },
+            body: fd
+        })
+        .then(function (resp) {
+            if (!resp.ok) return resp.json().then(function (d) { throw new Error(d.error || 'Error al actualizar'); });
+            return resp.json();
+        })
+        .then(function (data) {
+            if (data.ok) {
+                this.setAttribute('data-estado-actual', nuevo);
+                mostrarToast(data.mensaje || 'Estado actualizado.', 'ok');
+                // Actualizar el badge de "PROGRESO" localmente y luego recargar
+                // para que TODA la fila (progreso, dots) quede consistente con la BD.
+                var fila = form.closest('tr');
+                if (fila) {
+                    var badges = fila.querySelectorAll('.badge-estado-mini, [data-estado]');
+                    badges.forEach(function (b) {
+                        b.textContent = (nuevo.charAt(0).toUpperCase() + nuevo.slice(1));
+                    });
+                }
+                setTimeout(function () { location.reload(); }, 800);
+            } else {
+                this.value = anterior;
+                mostrarToast(data.error || 'No se pudo actualizar el estado.', 'error');
+            }
+        }.bind(this))
+        .catch(function (err) {
+            this.value = anterior;
+            mostrarToast(err.message || 'Ocurrió un error al actualizar el estado.', 'error');
+        }.bind(this))
+        .finally(function () {
+            this.disabled = false;
+        }.bind(this));
+    });
+});
+</script>
 
 {% endblock %}

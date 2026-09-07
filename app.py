@@ -1,14 +1,17 @@
 import os
 import sys
+import time
 import uuid
-# AÑADIR después de: import uuid
+import secrets
+import hmac
+
 from urllib.parse import quote
-# Intento seguro de importar dependencias externas; si faltan, mostrar instrucciones claras y salir.
+
 try:
-    from flask import Flask, render_template, request, redirect, url_for, session, flash
+    from flask import Flask, render_template, request, redirect, url_for, session, flash, abort
     from flask_bcrypt import Bcrypt
     from functools import wraps
-    from werkzeug.utils import secure_filename   # ← NUEVO
+    from werkzeug.utils import secure_filename 
     from dotenv import load_dotenv
 except Exception as e:
     print("\nERROR: faltan dependencias necesarias para ejecutar la aplicación.")
@@ -37,7 +40,7 @@ if not app.secret_key:
 
 os.environ['TZ'] = 'America/Lima'
 
-# El ORM (modelo Producto) usa la BD Tienda.
+
 _tienda_uri = os.environ.get("DATABASE_URI_TIENDA")
 if not _tienda_uri:
     raise RuntimeError("DATABASE_URI_TIENDA no definida en el archivo .env.")
@@ -53,6 +56,11 @@ app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 UPLOAD_FOLDER      = os.path.join(app.root_path, 'static', 'img')
 ALLOWED_EXTENSIONS = {'jpg', 'jpeg', 'png', 'webp', 'gif'}
 app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024   # 5 MB máximo
+# Endurecer la cookie de sesión: HttpOnly + SameSite=Lax.
+# Secure solo si SESSION_COOKIE_SECURE=1 en el entorno (requiere HTTPS; en dev local se desactiva).
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['SESSION_COOKIE_SECURE']   = os.environ.get("SESSION_COOKIE_SECURE", "0") == "1"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 def allowed_file(filename):
@@ -74,17 +82,109 @@ db.init_app(app)
 bcrypt = Bcrypt(app)
 
 
-def enviar_correo(destino, asunto, cuerpo_html, cuerpo_texto=None):
-    """Envía un correo vía Gmail SMTP (STARTTLS, puerto 587).
+def _inicializar_schema_auth():
+    """Crea (si no existen) las tablas auxiliares de OTP/verificación en la BD
+    Auth. Precondición: la tabla `cliente` ya debe existir.
 
-    Usa SMTP_USER / SMTP_PASS del entorno (contraseña de aplicación de Gmail).
-
-    Retorna:
-      - None                  -> envío exitoso
-      - 'smtp_no_configurado' -> faltan SMTP_USER/SMTP_PASS (modo desarrollo)
-      - 'smtp_auth'           -> error de autenticación con Gmail
-      - 'error'               -> cualquier otro fallo de envío
+    HISTÓRICO/CAUSA DE BUG: el archivo migracion_verificacion.sql definía una
+    tabla `verificacion_registro` con sintaxis MySQL, mientras que el código
+    usa `verificacion_cuenta` (PostgreSQL/Supabase). Si la tabla correcta no
+    se creó, cualquier INSERT de registro falla y el usuario recibe el error
+    genérico "No se pudo iniciar el registro". Este bootstrap es autocorregible.
     """
+    conn = None
+    cursor = None
+    try:
+        conn = get_connection_auth()
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS verificacion_cuenta (
+                id_verificacion     SERIAL PRIMARY KEY,
+                id_cliente          INTEGER NOT NULL,
+                codigo_hash         TEXT NOT NULL,
+                creado_en           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                expira_en           TIMESTAMPTZ NOT NULL,
+                usado               BOOLEAN NOT NULL DEFAULT FALSE,
+                intentos_fallidos   INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS recuperacion_contrasena (
+                id_recuperacion     SERIAL PRIMARY KEY,
+                id_usuario          INTEGER,
+                id_cliente          INTEGER,
+                codigo_hash         TEXT NOT NULL,
+                creado_en           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                expira_en           TIMESTAMPTZ NOT NULL,
+                usado               BOOLEAN NOT NULL DEFAULT FALSE,
+                intentos_fallidos   INTEGER NOT NULL DEFAULT 0,
+                ip_solicitud        VARCHAR(64)
+            )
+        """)
+        conn.commit()
+        # Funcionalidad 1 (POS): columna `origen` para distinguir clientes creados
+        # desde el Punto de Venta (origen='pos') de los registrados por la web
+        # (origen='web'). Autocorrección igual que las tablas OTP: si el SQL de
+        # migración no se ejecutó, se agrega aquí al arrancar la app.
+        cursor.execute("""
+            ALTER TABLE cliente
+                ADD COLUMN IF NOT EXISTS origen VARCHAR(10) NOT NULL DEFAULT 'web'
+        """)
+        conn.commit()
+        # Índice único parcial por documento: evita duplicar clientes al repetir
+        # el mismo DNI/RUC desde el POS. Excluye ''/NULL (clientes web en registro).
+        # Se aplica en commit aparte para que si existen duplicados viejos en
+        # producción, el fallo de este índice NO revierta la columna origen.
+        cursor.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_cliente_documento
+            ON cliente (id_tipo_documento, nro_documento)
+            WHERE nro_documento IS NOT NULL AND nro_documento <> ''
+        """)
+        conn.commit()
+        # Funcionalidad 1 (POS): los clientes creados desde el Punto de Venta no
+        # tienen credenciales web (email y contrasena NULL por diseño; no pueden
+        # iniciar sesión y el modal POS ni siquiera los solicita). `telefono` y
+        # `direccion` también son opcionales (modal POS y formulario web los
+        # validan a nivel de aplicación, no de BD). Si la BD Auth los declara
+        # NOT NULL, el INSERT de /clientes/registrar_pos falla con
+        # "null value in column ... violates not-null constraint". Aquí se
+        # alinea la BD con el modelo de la app: solo se liberan las columnas
+        # que EL PROPIO CÓDIGO envía como NULL y que el negocio no exige.
+        # El registro web sigue exigiendo email y dirección en el formulario.
+        for _col in ('email', 'contrasena', 'telefono', 'direccion'):
+            cursor.execute("""
+                SELECT is_nullable FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'cliente'
+                  AND column_name = %s
+            """, (_col,))
+            _row = cursor.fetchone()
+            if _row is not None and _row[0] == 'NO':
+                cursor.execute(
+                    'ALTER TABLE cliente ALTER COLUMN %s DROP NOT NULL' % _col
+                )
+                conn.commit()
+        app.logger.info("Esquema Auth verificado (verificacion_cuenta / recuperacion_contrasena / origen / columnas opcionales POS).")
+    except Exception as e:
+        app.logger.error(f"No se pudo crear el esquema auxiliar Auth: {e}")
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+with app.app_context():
+    _inicializar_schema_auth()
+
+
+def enviar_correo(destino, asunto, cuerpo_html, cuerpo_texto=None):
+    
     smtp_user = os.environ.get('SMTP_USER', '').strip()
     smtp_pass = os.environ.get('SMTP_PASS', '').strip()
     if not smtp_user or not smtp_pass:
@@ -137,16 +237,89 @@ class Producto(db.Model):
 
 
 # ── Decorators ──────────────────────────────────────────────
+# Rate-limit simple en memoria para los inicios de sesión (sin dependencias).
+# Clave: IP + correo normalizado. Ventana de 15 min, máx 5 intentos fallidos.
+_LIMITE_LOGIN = 5
+_VENTANA_LOGIN = 900  # 15 minutos
+_FALLOS_LOGIN = {}
+
+
+def _clave_login(correo):
+    return f"{request.remote_addr or '?'}:{str(correo or '').strip().lower()}"
+
+
+def _bloqueado_login(clave):
+    ahora = time.time()
+    rec = _FALLOS_LOGIN.get(clave)
+    if not rec:
+        return False
+    if ahora - rec.get('t', 0) > _VENTANA_LOGIN:
+        _FALLOS_LOGIN.pop(clave, None)
+        return False
+    return rec['n'] >= _LIMITE_LOGIN
+
+
+def _registrar_error_login(clave):
+    ahora = time.time()
+    rec = _FALLOS_LOGIN.get(clave)
+    if not rec or ahora - rec.get('t', 0) > _VENTANA_LOGIN:
+        _FALLOS_LOGIN[clave] = {'n': 1, 't': ahora}
+    else:
+        rec['n'] = rec.get('n', 0) + 1
+
+
+def _resetear_login(clave):
+    _FALLOS_LOGIN.pop(clave, None)
+
+
+# ── CSRF focalizado ─────────────────────────────────────────
+# Sin depender de Flask-WTF: token por sesión, validado SOLO en los endpoints
+# de mayor riesgo (auth, OTP, cambio de clave, carrito/pago).
+_CSRF_PROTEGIDAS = {
+    'login', 'login_cliente', 'registro_cliente', 'verificar_registro',
+    'recuperar_contrasena', 'restablecer_contrasena', 'cambiar_clave',
+    'procesar_pago', 'carrito_confirmar_v2', 'carrito_agregar',
+    'registrar_pos',
+}
+
+
+def _obtener_csrf_token():
+    token = session.get('_csrf_token')
+    if not token:
+        token = secrets.token_hex(32)
+        session['_csrf_token'] = token
+    return token
+
+
+@app.context_processor
+def _ctx_csrf_token():
+    return {'csrf_token': _obtener_csrf_token()}
+
+
+@app.before_request
+def _validar_csrf():
+    if request.method not in ('POST', 'PUT', 'PATCH', 'DELETE'):
+        return None
+    if request.endpoint not in _CSRF_PROTEGIDAS:
+        return None
+    procedente = request.form.get('csrf_token') \
+        or request.headers.get('X-CSRFToken') \
+        or (request.get_json(silent=True) or {}).get('csrf_token')
+    if procedente and hmac.compare_digest(str(procedente), session.get('_csrf_token', '')):
+        return None
+    return abort(400)
+
+
 # Rutas de cliente (públicas/catálogo) que deben redirigir a /login_cliente,
 # no al login administrativo
-_RUTAS_CLIENTE = ('/carrito', '/mis_pedidos', '/procesar_pago', '/carrito/confirmar')
+_RUTAS_CLIENTE = ('/carrito', '/mis_pedidos', '/procesar_pago')
 
 
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if "usuario_id" not in session:
-            # Si la petición viene de una ruta de cliente, mandar a login de clientes
+
             if any(request.path.startswith(r) for r in _RUTAS_CLIENTE):
                 return redirect(url_for("login_cliente"))
             return redirect(url_for("login"))
@@ -157,8 +330,7 @@ def admin_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if session.get("rol") != "administrador":
-            flash("Acceso denegado.", "danger")
-            return redirect(url_for("productos"))
+            abort(403)
         return f(*args, **kwargs)
     return decorated_function
 
@@ -166,13 +338,18 @@ def escritura_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if session.get("rol") not in ("administrador", "vendedor"):
-            flash("No tienes permisos para realizar esta acción.", "danger")
-            return redirect(url_for("productos"))
+            abort(403)
         return f(*args, **kwargs)
     return decorated_function
 
 
 # ── Auth ─────────────────────────────────────────────────────
+@app.context_processor
+def _ctx_recuperacion_origen():
+    """Determina desde qué login se llegó a recuperar_contrasena (admin | cliente)."""
+    return {'recuperar_origen': request.values.get('origen', 'cliente')}
+
+
 @app.route('/')
 def inicio():
     return redirect(url_for('catalogo_cliente'))
@@ -183,6 +360,9 @@ def login():
     if request.method == 'POST':
         correo = request.form['correo']
         clave  = request.form['clave']
+        clave_lim = _clave_login(correo)
+        if _bloqueado_login(clave_lim):
+            return render_template('login.html', error='Demasiados intentos fallidos. Espera 15 minutos e inténtalo de nuevo.')
         conn   = get_connection_auth()
         cursor = conn.cursor(dictionary=True)
         cursor.execute("""
@@ -196,16 +376,18 @@ def login():
 
         if usuario and bcrypt.check_password_hash(usuario['contrasena'], clave):
             rol_usuario = (usuario.get('rol') or '').lower()
-            # Permitir solo administradores y vendedores en este login
+           
             if rol_usuario not in ('administrador', 'vendedor'):
-                # Mensaje breve indicando redirección al login de clientes
-                return render_template('login.html', error='Acceso restringido. Si eres cliente usa el acceso de clientes: /login_cliente')
+              
+                return render_template('login.html', error='Acceso restringido. Esta sección es solo para el personal administrativo de CLEOFERR.')
+            _resetear_login(clave_lim)
             session['usuario_id'] = usuario['id_usuario']
             session['rol']        = usuario['rol']
             session['nombre']     = usuario['nombres']
             return redirect(url_for('productos'))
+        _registrar_error_login(clave_lim)
         return render_template('login.html', error='Credenciales incorrectas')
-    # Botón WhatsApp para recuperar credenciales (personal administrativo)
+    
     msg_admin = quote(
         "Hola Soporte de Inversiones CLEOFERR, soy del personal ADMINISTRATIVO "
         "(Administradora/Vendedora) y presento problemas con mis credenciales de acceso al sistema."
@@ -219,6 +401,10 @@ def login_cliente():
     if request.method == 'POST':
         correo     = request.form['correo']
         contrasena = request.form['contrasena']
+        clave_lim  = _clave_login(correo)
+        if _bloqueado_login(clave_lim):
+            return render_template('login_cliente.html',
+                                   error='Demasiados intentos fallidos. Espera 15 minutos e inténtalo de nuevo.')
         conn       = get_connection_auth()
         cursor     = conn.cursor(dictionary=True)
         # Busca el cliente por email — la columna nombre puede variar
@@ -241,6 +427,7 @@ def login_cliente():
                 ok = False
 
             if ok:
+                _resetear_login(clave_lim)
                 nombre_cliente = (
                     cliente.get('nombre') or
                     cliente.get('nombres') or
@@ -252,6 +439,7 @@ def login_cliente():
                 session['nombre']     = nombre_cliente
                 return redirect(url_for('catalogo_cliente'))
 
+        _registrar_error_login(clave_lim)
         return render_template('login_cliente.html', error='Credenciales incorrectas')
     # Botón WhatsApp para recuperar credenciales (clientes)
     msg_cliente = quote(
@@ -265,8 +453,9 @@ def login_cliente():
 @app.route('/logout')
 @login_required
 def logout():
+    es_cliente = session.get('rol') == 'cliente'
     session.clear()
-    return redirect(url_for('login'))
+    return redirect(url_for('login_cliente') if es_cliente else url_for('login'))
 
 
 
@@ -884,6 +1073,96 @@ def editar_cliente(id):
     return render_template('cliente_form.html', cliente=cliente)
 
 
+# ── Registro rápido de cliente desde el Punto de Venta (por DNI/RUC) ────────
+# Boleta  → DNI (8 dígitos) + nombre (autocompletado vía RENIEC en el frontend).
+# Factura → RUC (11 dígitos, inicia en 10 o 20) + razón social + dirección fiscal.
+# id_tipo_documento: 1 = DNI, 6 = RUC (catálogo SUNAT; el proyecto ya usa 1 = DNI
+# en seed_data.py). Los clientes POS se crean con origen='pos' y sin email ni
+# contraseña (no pueden iniciar sesión web, pero sí aparecen en ventas/reportes).
+@app.route('/clientes/registrar_pos', methods=['POST'])
+@login_required
+@escritura_required
+def registrar_pos():
+    data = request.get_json(silent=True) or {}
+    tipo = (data.get('tipo') or 'boleta').strip().lower()
+    if tipo not in ('boleta', 'factura'):
+        return {'ok': False, 'error': 'Tipo de comprobante inválido.'}, 400
+
+    nombre    = (data.get('nombre') or '').strip()
+    telefono  = (data.get('telefono') or '').strip()
+    apellido  = (data.get('apellido') or '').strip()
+    direccion = (data.get('direccion') or '').strip()
+
+    if tipo == 'boleta':
+        doc = (data.get('dni') or '').strip()
+        if not doc.isdigit() or len(doc) != 8:
+            return {'ok': False, 'error': 'El DNI debe tener exactamente 8 dígitos.'}, 400
+        if len(nombre) < 3:
+            return {'ok': False, 'error': 'El nombre del cliente es obligatorio (mínimo 3 caracteres).'}, 400
+    else:
+        doc = (data.get('ruc') or '').strip()
+        if not doc.isdigit() or len(doc) != 11 or doc[:2] not in ('10', '20'):
+            return {'ok': False, 'error': 'El RUC debe tener 11 dígitos y comenzar con 10 o 20.'}, 400
+        if len(nombre) < 3:
+            return {'ok': False, 'error': 'La razón social es obligatoria (mínimo 3 caracteres).'}, 400
+        if len(direccion) < 5:
+            return {'ok': False, 'error': 'La dirección fiscal es obligatoria para factura (mínimo 5 caracteres).'}, 400
+
+    if telefono and (not telefono.isdigit() or len(telefono) != 9):
+        return {'ok': False, 'error': 'El teléfono debe tener exactamente 9 dígitos.'}, 400
+
+    id_tipo_doc = 1 if tipo == 'boleta' else 6
+    conn   = get_connection_auth()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        # ¿Ya existe un cliente con ese documento? → se reutiliza (no se duplica)
+        cursor.execute("""
+            SELECT id_cliente, nombre, apellido, telefono FROM cliente
+            WHERE id_tipo_documento = %s AND nro_documento = %s
+        """, (id_tipo_doc, doc))
+        existente = cursor.fetchone()
+        if existente:
+            if telefono and not (existente.get('telefono') or '').strip():
+                cursor.execute(
+                    "UPDATE cliente SET telefono = %s WHERE id_cliente = %s",
+                    (telefono, existente['id_cliente']))
+                conn.commit()
+            nombre_existente = f"{existente.get('nombre') or ''} {existente.get('apellido') or ''}".strip()
+            return {'ok': True, 'id_cliente': existente['id_cliente'],
+                    'nombre': nombre_existente, 'ya_existia': True}
+
+        # `apellido` es NOT NULL en la BD. Si no se envió y es una boleta (RENIEC:
+        # Nombres ApellidoPaterno ApellidoMaterno), separamos el nombre completo;
+        # como último recurso usamos '' (cadena vacía respeta NOT NULL). En
+        # factura, la razón social se guarda completa en `nombre` y `apellido` ''.
+        nombre_db   = nombre
+        apellido_db = apellido
+        if not apellido_db and tipo == 'boleta':
+            partes = nombre.split()
+            if len(partes) >= 2:
+                nombre_db   = partes[0]
+                apellido_db = ' '.join(partes[1:])
+        cursor.execute("""
+            INSERT INTO cliente (nombre, apellido, email, telefono, id_tipo_documento,
+                                 nro_documento, direccion, contrasena, activo, origen)
+            VALUES (%s, %s, NULL, %s, %s, %s, %s, NULL, TRUE, 'pos')
+            RETURNING id_cliente
+        """, (nombre_db, apellido_db, telefono or None, id_tipo_doc, doc,
+              direccion or None))
+        id_cliente = cursor.fetchone()['id_cliente']
+        conn.commit()
+        # Nombre completo para mostrar en el select del POS
+        nombre_mostrar = f"{nombre_db} {apellido_db}".strip()
+        return {'ok': True, 'id_cliente': id_cliente, 'nombre': nombre_mostrar,
+                'ya_existia': False}
+    except Exception as e:
+        conn.rollback()
+        app.logger.error("Error al registrar cliente desde el POS: %s", e)
+        return {'ok': False, 'error': 'No se pudo guardar el cliente (error interno).'}, 500
+    finally:
+        conn.close()
+
+
 @app.route('/clientes/eliminar/<int:id>')
 @login_required
 @admin_required
@@ -1114,8 +1393,9 @@ def eliminar_proveedor(id):
 # Reemplazar/añadir la vista de eliminación evitando sobrescribir un endpoint existente.
 # Si ya existe otra función llamada eliminar_proveedor, esta usa un nombre de función y endpoint distintos.
 @app.route('/proveedores/eliminar/<int:proveedor_id>', methods=['POST'], endpoint='eliminar_proveedor_post')
+@login_required
+@admin_required
 def eliminar_proveedor_post(proveedor_id):
-    # Verificar sesión / permisos básicos
     if not session.get('usuario_id'):
         flash('Acceso no autorizado.', 'danger')
         return redirect('/login')
@@ -1145,9 +1425,34 @@ def pedidos():
     """)
     lista_estados = [r['nombre'] for r in cursor.fetchall()]
     PASOS = [e for e in lista_estados if e != 'cancelado']
+
+    # ── Filtros del panel (desde la barra de filtros del template) ──
+    f_desde   = (request.args.get('desde') or '').strip()
+    f_hasta   = (request.args.get('hasta') or '').strip()
+    f_estado  = (request.args.get('estado') or '').strip()
+    f_q       = (request.args.get('q') or '').strip()
+
+    where     = []
+    params    = []
+    if f_desde:
+        where.append("v.fecha::date >= %s")
+        params.append(f_desde)
+    if f_hasta:
+        where.append("v.fecha::date <= %s")
+        params.append(f_hasta)
+    if f_estado:
+        where.append("ev.nombre = %s")
+        params.append(f_estado)
+    if f_q:
+        where.append("(CAST(v.id_venta AS TEXT) ILIKE %s OR v.id_cliente::TEXT ILIKE %s)")
+        qq = f'%{f_q}%'
+        params.append(qq)
+        params.append(qq)
+    where_sql = (' WHERE ' + ' AND '.join(where)) if where else ''
+
     try:
         # Consulta 1 (Tienda): ventas + total, sin joins cross-BD
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT
                 v.id_venta      AS id_pedido,
                 v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima' AS fecha,
@@ -1160,11 +1465,12 @@ def pedidos():
             LEFT JOIN tipo_venta tv ON v.id_tipo_venta = tv.id_tipo_venta
             LEFT JOIN estado_venta ev ON v.id_estado_venta = ev.id_estado_venta
             LEFT JOIN detalle_venta d ON v.id_venta = d.id_venta
+            {where_sql}
             GROUP BY v.id_venta, v.fecha, tv.nombre, ev.nombre,
                      v.id_cliente, v.id_usuario_vendedor
             ORDER BY v.fecha DESC
             LIMIT 200
-        """)
+        """, params)
         pedidos_raw = cursor.fetchall()
 
         # Consulta 2 (Auth): clientes y usuarios
@@ -1189,9 +1495,14 @@ def pedidos():
             estado = ped.get('estado') or 'pendiente'
             ped['idx_actual'] = PASOS.index(estado) if estado in PASOS else -1
             ped['progreso'] = int((ped['idx_actual'] + 1) * 20) if ped['idx_actual'] >= 0 else 0
+            # Venta local ya cobrada: NO aplica el flujo de despacho/entrega.
+            ped['es_local_entregado'] = (ped.get('tipo_venta') == 'local' and estado == 'entregado')
             nombre   = ped.get('cliente_nombre') or 'Cliente'
             telefono = (ped.get('cliente_telefono') or '').strip()
-            if telefono:
+            # El aviso por WhatsApp ("pedido procesado y listo") es del flujo
+            # ONLINE (delivery). Las ventas locales se entregan en mostrador:
+            # no se notifica un "pedido listo".
+            if telefono and ped.get('tipo_venta') != 'local':
                 from urllib.parse import quote
                 if telefono.startswith('+'):
                     telefono = telefono[1:]
@@ -1240,13 +1551,28 @@ def venta_nueva_form():
         conn.close()
     except Exception as e:
         print(f"ERROR en /ventas/nueva GET: {e}")
-    return render_template('venta_form.html', clientes=clientes, productos=productos)
+    # Token de un solo uso: cada formulario solo puede cobrar UNA vez.
+    # Evita dobles cobros por doble clic / re-envío del mismo POST.
+    if not session.get('venta_token'):
+        session['venta_token'] = secrets.token_hex(16)
+    return render_template('venta_form.html', clientes=clientes, productos=productos,
+                           venta_token=session.get('venta_token'))
 
 
 @app.route('/ventas/nueva', methods=['POST'])
 @login_required
 @escritura_required
 def venta_nueva_guardar():
+    # Protección anti doble cobro: el token se genera en cada GET y se consume
+    # con la primera venta. Si se re-envía el mismo formulario (doble clic,
+    # F5/back + submit) el token ya no coincide y se rechaza el duplicado.
+    venta_token = request.form.get('venta_token')
+    if session.get('venta_token') and venta_token != session['venta_token']:
+        flash('Esta venta ya fue registrada: no se permite un doble cobro.', 'warning')
+        return redirect(url_for('pedidos'))
+    # Consumir el ticket: esta página de cobro no puede volver a procesarse.
+    session['venta_token'] = secrets.token_hex(16)
+
     id_cliente   = request.form.get('id_cliente') or None
     tipo_venta   = request.form.get('tipo_venta', 'local')
     metodo_pago  = request.form.get('metodo_pago', 'efectivo')
@@ -1272,28 +1598,46 @@ def venta_nueva_guardar():
                 flash('No puedes registrar una venta local sin una caja abierta. Abre caja primero en /caja.', 'danger')
                 return redirect(url_for('caja'))
 
+        # Regla de negocio: una venta LOCAL (caja/POS) se considera ENTREGADA
+        # de inmediato al confirmarse el pago: el cliente recibe el producto en
+        # el mostrador y NO pasa por pendiente → preparación → despacho.
+        # Los pedidos ONLINE conservan su flujo (pendiente → ... → entregado)
+        # y NUNCA se auto-marcan como entregados aquí.
+        estado_nombre = 'entregado' if tipo_venta == 'local' else 'pendiente'
+
         # Crear la venta
         cursor.execute("""
             INSERT INTO venta (id_tipo_venta, id_cliente, id_usuario_vendedor, id_estado_venta)
             VALUES ((SELECT id_tipo_venta FROM tipo_venta WHERE nombre = %s), %s, %s,
-                    (SELECT id_estado_venta FROM estado_venta WHERE nombre = 'pendiente'))
+                    (SELECT id_estado_venta FROM estado_venta WHERE nombre = %s))
             RETURNING id_venta
-        """, (tipo_venta, id_cliente, session.get('usuario_id')))
+        """, (tipo_venta, id_cliente, session.get('usuario_id'), estado_nombre))
         id_venta = cursor.fetchone()['id_venta']
 
         # Insertar cada ítem y descontar stock
         for id_prod, cant in zip(ids_producto, cantidades):
-            cant = int(cant) if cant else 1
-            cursor.execute("SELECT precio, stock FROM producto WHERE id_producto = %s", (id_prod,))
+            try:
+                cant = int(cant) if cant else 1
+            except (TypeError, ValueError):
+                cant = 1
+            if cant <= 0:
+                raise ValueError("Las cantidades deben ser mayores a cero.")
+            cursor.execute("SELECT precio, stock, nombre FROM producto WHERE id_producto = %s", (id_prod,))
             prod = cursor.fetchone()
             if not prod:
                 continue
+            # No permitir vender más stock del disponible (evita stock negativo)
+            if cant > (prod['stock'] or 0):
+                raise ValueError(
+                    f"Stock insuficiente de \"{prod['nombre']}\" "
+                    f"(disponible: {prod['stock']} unidades). Venta no registrada."
+                )
             cursor.execute("""
                 INSERT INTO detalle_venta (id_venta, id_producto, cantidad, precio_unitario)
                 VALUES (%s, %s, %s, %s)
             """, (id_venta, id_prod, cant, prod['precio']))
             cursor.execute("""
-                UPDATE producto SET stock = stock - %s WHERE id_producto = %s
+                UPDATE producto SET stock = GREATEST(stock - %s, 0) WHERE id_producto = %s
             """, (cant, id_prod))
 
         # Registrar el pago y el ingreso en caja para ventas locales
@@ -1310,13 +1654,60 @@ def venta_nueva_guardar():
             """, (caja_activa['id_caja'], f'Venta local #{id_venta}',
                   session.get('usuario_id'), id_venta))
 
+        # ── Comprobante interno (boleta B001 / factura F001) ──
+        # Sin integración SUNAT real todavía: estado_sunat = 'no_aplica'.
+        # Replica el patrón de numeración del flujo online (prefijo B/F + 6
+        # dígitos de la venta + 4 dígitos aleatorios). Si ese bloque opcional
+        # falla, la venta se completa igual (savepoint, igual que el checkout).
+        comp_tipo = request.form.get('comp_tipo', '').strip().lower()
+        if comp_tipo in ('boleta', 'factura') and (id_cliente or request.form.get('comp_doc')):
+            import random, string
+            serie   = 'B001' if comp_tipo == 'boleta' else 'F001'
+            prefijo = 'B' if comp_tipo == 'boleta' else 'F'
+            numero  = f"{prefijo}{str(id_venta).zfill(6)}-" \
+                      f"{''.join(random.choices(string.digits, k=4))}"
+            doc_cliente = (request.form.get('comp_doc') or '').strip()
+            if id_cliente and not doc_cliente:
+                # Cliente elegido del dropdown: su documento vive en la BD Auth
+                conn_a = None
+                try:
+                    conn_a   = get_connection_auth()
+                    cursor_a = conn_a.cursor(dictionary=True)
+                    cursor_a.execute(
+                        "SELECT nro_documento FROM cliente WHERE id_cliente = %s",
+                        (id_cliente,))
+                    fila = cursor_a.fetchone()
+                    doc_cliente = (fila or {}).get('nro_documento') or ''
+                except Exception:
+                    doc_cliente = ''
+                finally:
+                    if conn_a is not None:
+                        try:
+                            conn_a.close()
+                        except Exception:
+                            pass
+            try:
+                cursor.execute("SAVEPOINT sp_comprobante")
+                cursor.execute("""
+                    INSERT INTO comprobante (id_venta, tipo, tipo_boleta, ruc_cliente,
+                                             numero, serie, estado_sunat, enviado_correo)
+                    VALUES (%s, %s, %s, NULLIF(%s, ''), %s, %s, 'no_aplica', 0)
+                """, (id_venta, comp_tipo,
+                      'simple' if comp_tipo == 'boleta' else None,
+                      doc_cliente, numero, serie))
+            except Exception as e:
+                app.logger.warning(
+                    "No se pudo generar el comprobante interno de la venta local %s: %s",
+                    id_venta, e)
+                cursor.execute("ROLLBACK TO SAVEPOINT sp_comprobante")
+
         conn.commit()
         flash(f'Venta #{id_venta} registrada correctamente.', 'success')
         return redirect(url_for('pedidos'))
 
     except Exception as e:
         print(f"ERROR al guardar venta: {e}")
-        flash('Error al registrar la venta. Intenta de nuevo.', 'danger')
+        flash(str(e) or 'Error al registrar la venta. Intenta de nuevo.', 'danger')
         return redirect(url_for('venta_nueva_form'))
     finally:
         conn.close()
@@ -1331,13 +1722,21 @@ UMBRAL_DIFERENCIA_CAJA = 20.0
 @login_required
 @escritura_required
 def caja():
-    """Panel de caja: estado actual, movimientos del turno e historial de cierres."""
+    """Panel de caja: estado actual, movimientos del turno, resumen por método
+    de pago e historial de cierres.
+
+    REGLA ECONÓMICA DE LA CAJA FÍSICA:
+      EFECTIVO esperado = fondo inicial + ventas locales pagadas en EFECTIVO − egresos
+    Yape/Plin y Tarjeta son pagos DIGITALES: se muestran aparte como resumen y
+    NO forman parte del dinero físico de la caja (no suben el esperado).
+    """
     conn   = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
     caja_abierta = None
     movimientos  = []
-    efectivo_sistema = 0.0
     historial = []
+    resumen   = {}
+    digitales_por_caja = {}
     uids = set()
     try:
         cursor.execute("SELECT * FROM caja WHERE estado = 'abierta' LIMIT 1")
@@ -1348,11 +1747,6 @@ def caja():
                 WHERE id_caja = %s ORDER BY fecha DESC
             """, (caja_abierta['id_caja'],))
             movimientos = cursor.fetchall()
-            # Solo existen 'ingreso' y 'egreso' (CHECK de la tabla)
-            efectivo_sistema = sum(
-                float(m['monto']) if m['tipo'] == 'ingreso' else -float(m['monto'])
-                for m in movimientos
-            )
             uids.add(caja_abierta['id_usuario_apertura'])
             uids.update(m['id_usuario'] for m in movimientos if m['id_usuario'])
 
@@ -1363,6 +1757,60 @@ def caja():
         for h in historial:
             if h['id_usuario_apertura']: uids.add(h['id_usuario_apertura'])
             if h['id_usuario_cierre']:   uids.add(h['id_usuario_cierre'])
+
+        # ── Resumen económico por caja (ventas LOCALES con pago confirmado) ──
+        caja_ids = ([caja_abierta['id_caja']] if caja_abierta else []) \
+                 + [h['id_caja'] for h in historial]
+        if caja_ids:
+            cursor.execute("""
+                SELECT p.id_caja, tp.nombre AS metodo,
+                       COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS total
+                FROM pago p
+                JOIN venta v       ON v.id_venta = p.id_venta
+                JOIN tipo_venta tv ON v.id_tipo_venta = tv.id_tipo_venta
+                JOIN tipo_pago tp  ON p.id_tipo_pago = tp.id_tipo_pago
+                LEFT JOIN detalle_venta d ON d.id_venta = v.id_venta
+                WHERE tv.nombre = 'local' AND p.estado = 'confirmado'
+                  AND p.id_caja = ANY(%s)
+                GROUP BY p.id_caja, tp.nombre
+            """, (caja_ids,))
+            ventas_por_caja = {}
+            for r in cursor.fetchall():
+                ventas_por_caja.setdefault(r['id_caja'], {})[r['metodo']] = float(r['total'] or 0)
+
+            cursor.execute("""
+                SELECT id_caja, COALESCE(SUM(monto), 0) AS total
+                FROM movimiento_caja
+                WHERE id_caja = ANY(%s) AND tipo = 'egreso'
+                GROUP BY id_caja
+            """, (caja_ids,))
+            egresos_por_caja = {r['id_caja']: float(r['total'] or 0)
+                                for r in cursor.fetchall()}
+
+            for row in ([caja_abierta] if caja_abierta else []) + historial:
+                met    = ventas_por_caja.get(row['id_caja'], {})
+                fondo  = float(row.get('monto_apertura') or 0)
+                ven_ef = met.get('efectivo', 0.0)
+                yape   = met.get('yape_plin', 0.0)
+                tar    = met.get('tarjeta', 0.0)
+                egres  = egresos_por_caja.get(row['id_caja'], 0.0)
+                esperado = fondo + ven_ef - egres
+                digitales_por_caja[row['id_caja']] = {
+                    'yape': yape,
+                    'tarjeta': tar,
+                    'total_digital': yape + tar,
+                    'ventas_efectivo': ven_ef,
+                }
+                if caja_abierta and row['id_caja'] == caja_abierta['id_caja']:
+                    resumen = {
+                        'fondo':           fondo,
+                        'ventas_efectivo': ven_ef,
+                        'yape':            yape,
+                        'tarjeta':         tar,
+                        'total_ventas':    ven_ef + yape + tar,
+                        'egresos':         egres,
+                        'esperado':        esperado,
+                    }
     except Exception as e:
         app.logger.exception("Error en /caja: %s", e)
     finally:
@@ -1384,7 +1832,8 @@ def caja():
     return render_template('caja.html',
                            caja=caja_abierta,
                            movimientos=movimientos,
-                           efectivo_sistema=efectivo_sistema,
+                           resumen=resumen,
+                           digitales=digitales_por_caja,
                            historial=historial,
                            nombres=nombres,
                            umbral=UMBRAL_DIFERENCIA_CAJA)
@@ -1436,11 +1885,54 @@ def caja_abrir():
     return redirect(url_for('caja'))
 
 
+@app.route('/caja/egreso', methods=['POST'])
+@login_required
+@escritura_required
+def caja_egreso():
+    """Registra un EGRESO (gasto/salida de efectivo) de la caja abierta.
+    Descuenta del efectivo esperado del cierre."""
+    concepto = request.form.get('concepto', '').strip()
+    try:
+        monto = float(request.form.get('monto', '0') or 0)
+    except ValueError:
+        monto = -1
+    if not concepto:
+        flash('El concepto del egreso es obligatorio.', 'danger')
+        return redirect(url_for('caja'))
+    if monto <= 0:
+        flash('El monto del egreso debe ser mayor que cero.', 'danger')
+        return redirect(url_for('caja'))
+
+    conn   = get_connection_tienda()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT id_caja FROM caja WHERE estado = 'abierta' LIMIT 1")
+        caja = cursor.fetchone()
+        if not caja:
+            flash('No hay ninguna caja abierta. Abre la caja para registrar egresos.', 'danger')
+            return redirect(url_for('caja'))
+
+        cursor.execute("""
+            INSERT INTO movimiento_caja (id_caja, tipo, monto, concepto, id_usuario)
+            VALUES (%s, 'egreso', %s, %s, %s)
+        """, (caja['id_caja'], monto, concepto, session.get('usuario_id')))
+        conn.commit()
+        flash(f'Egreso registrado en la caja #{caja["id_caja"]}: {concepto} por S/ {monto:.2f}.', 'success')
+    except Exception as e:
+        conn.rollback()
+        app.logger.exception("Error registrando egreso de caja: %s", e)
+        flash('No se pudo registrar el egreso.', 'danger')
+    finally:
+        conn.close()
+    return redirect(url_for('caja'))
+
+
 @app.route('/caja/cerrar', methods=['POST'])
 @login_required
 @escritura_required
 def caja_cerrar():
-    """Cierra la caja abierta: calcula el esperado y registra la diferencia."""
+    """Cierra la caja abierta: calcula el EFECTIVO esperado
+    (fondo + ventas en efectivo − egresos) y registra la diferencia."""
     try:
         declarado = float(request.form.get('monto_declarado', '0') or 0)
     except ValueError:
@@ -1457,12 +1949,46 @@ def caja_cerrar():
             flash('No hay ninguna caja abierta para cerrar.', 'danger')
             return redirect(url_for('caja'))
 
+        id_caja = caja['id_caja']
+        fondo   = float(caja.get('monto_apertura') or 0)
+
+        # Ventas LOCALES pagadas en EFECTIVO (el único dinero físico que entra)
         cursor.execute("""
-            SELECT COALESCE(SUM(CASE WHEN tipo = 'ingreso' THEN monto ELSE -monto END), 0) AS sistema
-            FROM movimiento_caja WHERE id_caja = %s
-        """, (caja['id_caja'],))
-        sistema = float(cursor.fetchone()['sistema'])
-        diferencia = declarado - sistema
+            SELECT COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS total
+            FROM pago p
+            JOIN venta v       ON v.id_venta = p.id_venta
+            JOIN tipo_venta tv ON v.id_tipo_venta = tv.id_tipo_venta
+            JOIN tipo_pago tp  ON p.id_tipo_pago = tp.id_tipo_pago
+            LEFT JOIN detalle_venta d ON d.id_venta = v.id_venta
+            WHERE tv.nombre = 'local' AND p.estado = 'confirmado'
+              AND p.id_caja = %s AND tp.nombre = 'efectivo'
+        """, (id_caja,))
+        ventas_efectivo = float(cursor.fetchone()['total'] or 0)
+
+        # Egresos del turno (descuentan del efectivo esperado)
+        cursor.execute("""
+            SELECT COALESCE(SUM(monto), 0) AS total
+            FROM movimiento_caja WHERE id_caja = %s AND tipo = 'egreso'
+        """, (id_caja,))
+        egresos = float(cursor.fetchone()['total'] or 0)
+
+        esperado = fondo + ventas_efectivo - egresos
+        diferencia = declarado - esperado
+
+        # Pagos DIGITALES del turno (resumen informativo; NO afectan el efectivo)
+        cursor.execute("""
+            SELECT tp.nombre AS metodo, COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS total
+            FROM pago p
+            JOIN venta v       ON v.id_venta = p.id_venta
+            JOIN tipo_venta tv ON v.id_tipo_venta = tv.id_tipo_venta
+            JOIN tipo_pago tp  ON p.id_tipo_pago = tp.id_tipo_pago
+            LEFT JOIN detalle_venta d ON d.id_venta = v.id_venta
+            WHERE tv.nombre = 'local' AND p.estado = 'confirmado'
+              AND p.id_caja = %s AND tp.nombre IN ('yape_plin', 'tarjeta')
+            GROUP BY tp.nombre
+        """, (id_caja,))
+        digital = {r['metodo']: float(r['total'] or 0) for r in cursor.fetchall()}
+        yape, tarjeta = digital.get('yape_plin', 0.0), digital.get('tarjeta', 0.0)
 
         # El cierre se refleja solo en la fila de caja (sin movimiento_caja 'cierre');
         # los montos quedan en la propia caja y sus movimientos del turno.
@@ -1476,14 +2002,21 @@ def caja_cerrar():
                 diferencia = %s,
                 observaciones = %s
             WHERE id_caja = %s
-        """, (session.get('usuario_id'), sistema, declarado, diferencia,
-              observaciones, caja['id_caja']))
+        """, (session.get('usuario_id'), esperado, declarado, diferencia,
+              observaciones, id_caja))
         conn.commit()
 
+        mensaje = (
+            f'Caja #{id_caja} cerrada. EFECTIVO: fondo S/ {fondo:.2f} + ventas '
+            f'efectivo S/ {ventas_efectivo:.2f} − egresos S/ {egresos:.2f} '
+            f'= esperado S/ {esperado:.2f} | '
+            f'PAGOS DIGITALES: Yape/Plin S/ {yape:.2f}, Tarjeta S/ {tarjeta:.2f} | '
+            f'Diferencia: S/ {diferencia:+.2f}.'
+        )
         if abs(diferencia) > UMBRAL_DIFERENCIA_CAJA:
-            flash(f'Caja #{caja["id_caja"]} cerrada. ⚠ Diferencia de S/ {diferencia:+.2f} supera el umbral (S/ {UMBRAL_DIFERENCIA_CAJA:.0f}).', 'warning')
+            flash(mensaje + f' ⚠ La diferencia supera el umbral (S/ {UMBRAL_DIFERENCIA_CAJA:.0f}).', 'warning')
         else:
-            flash(f'Caja #{caja["id_caja"]} cerrada. Diferencia: S/ {diferencia:+.2f}.', 'success')
+            flash(mensaje, 'success')
     except Exception as e:
         conn.rollback()
         app.logger.exception("Error cerrando caja: %s", e)
@@ -1525,11 +2058,13 @@ def pedido_detalle(id):
             cursor_a = conn_a.cursor(dictionary=True)
             if pedido.get('id_cliente'):
                 cursor_a.execute(
-                    "SELECT nombre, apellido, telefono FROM cliente WHERE id_cliente = %s",
+                    "SELECT nombre, apellido, telefono, nro_documento, direccion FROM cliente WHERE id_cliente = %s",
                     (pedido['id_cliente'],))
                 cli = cursor_a.fetchone() or {}
-                pedido['cliente_nombre']   = (f"{cli.get('nombre') or ''} {cli.get('apellido') or ''}").strip()
-                pedido['cliente_telefono'] = cli.get('telefono')
+                pedido['cliente_nombre']    = (f"{cli.get('nombre') or ''} {cli.get('apellido') or ''}").strip()
+                pedido['cliente_telefono']  = cli.get('telefono')
+                pedido['cliente_documento'] = (cli.get('nro_documento') or '').strip() or None
+                pedido['cliente_direccion'] = (cli.get('direccion') or '').strip() or None
             if pedido.get('id_usuario_vendedor'):
                 cursor_a.execute(
                     "SELECT nombres FROM usuario WHERE id_usuario = %s",
@@ -1553,13 +2088,63 @@ def pedido_detalle(id):
         print(f"ERROR pedido_detalle: {e}")
     finally:
         conn.close()
+    # Fases válidas leídas de la BD (misma fuente que el panel admin y el
+    # cliente), de modo que el timeline siempre muestre nombres consistentes.
+    PASOS = []
+    try:
+        conn_f   = get_connection_tienda()
+        cursor_f = conn_f.cursor(dictionary=True)
+        cursor_f.execute("SELECT nombre FROM estado_venta WHERE activo = TRUE ORDER BY orden")
+        PASOS = [r['nombre'] for r in cursor_f.fetchall()]
+        conn_f.close()
+    except Exception:
+        PASOS = []
+    PASOS = [f for f in PASOS if f != 'cancelado']
+    if not PASOS:
+        PASOS = ['pendiente', 'confirmado', 'preparando', 'listo', 'entregado']
     # Calcular idx_actual en Python para evitar el error .index() en Jinja2
-    PASOS = ['pendiente', 'procesando', 'enviado', 'entregado']
     estado_actual = (pedido.get('estado') or 'pendiente') if pedido else 'pendiente'
     idx_actual = PASOS.index(estado_actual) if estado_actual in PASOS else 0
     return render_template('pedido_detalle.html', pedido=pedido, items=items,
                            comprobante=comprobante, id=id,
-                           idx_actual=idx_actual, fases_orden=PASOS)
+                           idx_actual=idx_actual, fases_orden=PASOS,
+                           estados=PASOS)
+
+def _reportes_resumen(cursor):
+    """Tarjetas de resumen (ventas hoy / stock total / alertas) usadas por /reportes
+    y por /reportes/generar."""
+    resumen = {}
+    # Ventas hoy (si existe tabla venta con campo fecha)
+    try:
+        cursor.execute("""
+            SELECT COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS ventas_hoy
+            FROM venta v
+            JOIN detalle_venta d ON v.id_venta = d.id_venta
+            WHERE DATE(v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima') = CURRENT_DATE
+        """)
+        row = cursor.fetchone()
+        resumen['ventas_hoy'] = float(row['ventas_hoy'] or 0)
+    except Exception:
+        resumen['ventas_hoy'] = 0
+
+    # Stock total (suma de stock de productos)
+    try:
+        cursor.execute("SELECT COALESCE(SUM(stock),0) AS stock_total FROM producto")
+        row = cursor.fetchone()
+        resumen['stock_total'] = int(row['stock_total'] or 0)
+    except Exception:
+        resumen['stock_total'] = 0
+
+    # Alertas pendientes
+    try:
+        cursor.execute("SELECT COUNT(*) AS cnt FROM alerta WHERE resuelta = FALSE")
+        row = cursor.fetchone()
+        resumen['alertas'] = int(row['cnt'] or 0)
+    except Exception:
+        resumen['alertas'] = 0
+
+    return resumen
+
 
 @app.route('/reportes')
 @login_required
@@ -1567,38 +2152,10 @@ def pedido_detalle(id):
 def reportes():
     conn = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
-    resumen = {}
     reportes_data = None
 
     try:
-        # Ventas hoy (si existe tabla pedido con campo total y fecha)
-        try:
-            cursor.execute("""
-                SELECT COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS ventas_hoy
-                FROM venta v
-                JOIN detalle_venta d ON v.id_venta = d.id_venta
-                WHERE DATE(v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima') = CURRENT_DATE
-            """)
-            row = cursor.fetchone()
-            resumen['ventas_hoy'] = float(row['ventas_hoy'] or 0)
-        except Exception:
-            resumen['ventas_hoy'] = 0
-
-        # Stock total (suma de stock de productos)
-        try:
-            cursor.execute("SELECT COALESCE(SUM(stock),0) AS stock_total FROM producto")
-            row = cursor.fetchone()
-            resumen['stock_total'] = int(row['stock_total'] or 0)
-        except Exception:
-            resumen['stock_total'] = 0
-
-        # Alertas pendientes
-        try:
-            cursor.execute("SELECT COUNT(*) AS cnt FROM alerta WHERE resuelta = FALSE")
-            row = cursor.fetchone()
-            resumen['alertas'] = int(row['cnt'] or 0)
-        except Exception:
-            resumen['alertas'] = 0
+        resumen = _reportes_resumen(cursor)
 
         # Dashboard inventario: entradas/salidas últimos 30 días (cantidad y valor)
         try:
@@ -1607,7 +2164,7 @@ def reportes():
                        COALESCE(SUM(cantidad),0) AS total_cantidad,
                        COALESCE(SUM(precio_unitario * cantidad),0) AS total_valor
                 FROM inventario_movimiento
-                WHERE fecha >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+                WHERE fecha >= NOW() - INTERVAL '30 days'
                 GROUP BY tipo
             """)
             agg = cursor.fetchall()
@@ -1636,6 +2193,113 @@ def reportes():
         except Exception:
             reportes_data = None
 
+    finally:
+        conn.close()
+
+    return render_template('reportes.html', resumen=resumen, reportes=reportes_data)
+
+
+@app.route('/reportes/generar')
+@login_required
+@escritura_required
+def reportes_generar():
+    tipo  = (request.args.get('tipo') or 'ventas').strip()
+    desde = (request.args.get('desde') or '').strip() or None
+    hasta = (request.args.get('hasta') or '').strip() or None
+
+    conn = get_connection_tienda()
+    cursor = conn.cursor(dictionary=True)
+    resumen = _reportes_resumen(cursor)
+    reportes_data = None
+
+    try:
+        cond = []
+        params = []
+        if desde:
+            cond.append("v.fecha >= %s")
+            params.append(desde + 'T00:00:00')
+        if hasta:
+            cond.append("v.fecha < %s::timestamptz + INTERVAL '1 day'")
+            params.append(hasta + 'T00:00:00')
+        where = ("WHERE " + " AND ".join(cond)) if cond else ""
+
+        if tipo == 'ventas':
+            cursor.execute(f"""
+                SELECT v.id_venta,
+                       COALESCE(c.nombre, '—') AS cliente,
+                       v.fecha,
+                       COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS total
+                FROM venta v
+                LEFT JOIN cliente c ON v.id_cliente = c.id_cliente
+                LEFT JOIN detalle_venta d ON v.id_venta = d.id_venta
+                {where}
+                GROUP BY v.id_venta, c.nombre, v.fecha
+                ORDER BY v.fecha DESC
+            """, params)
+            filas = cursor.fetchall()
+            reportes_data = {
+                'headers': ['N°', 'Cliente', 'Fecha', 'Total (S/)'],
+                'rows': [[r['id_venta'], r['cliente'] or '—', r['fecha'],
+                          f"{float(r['total'] or 0):.2f}"] for r in filas],
+            }
+        elif tipo == 'pedidos':
+            cursor.execute(f"""
+                SELECT v.id_venta,
+                       COALESCE(c.nombre, '—') AS cliente,
+                       COALESCE(e.nombre, '—') AS estado,
+                       v.fecha,
+                       COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS total
+                FROM venta v
+                LEFT JOIN cliente c ON v.id_cliente = c.id_cliente
+                LEFT JOIN estado_venta e ON v.id_estado_venta = e.id_estado_venta
+                LEFT JOIN detalle_venta d ON v.id_venta = d.id_venta
+                {where}
+                GROUP BY v.id_venta, c.nombre, e.nombre, v.fecha
+                ORDER BY v.fecha DESC
+            """, params)
+            filas = cursor.fetchall()
+            reportes_data = {
+                'headers': ['N°', 'Cliente', 'Estado', 'Fecha', 'Total (S/)'],
+                'rows': [[r['id_venta'], r['cliente'] or '—', r['estado'], r['fecha'],
+                          f"{float(r['total'] or 0):.2f}"] for r in filas],
+            }
+        elif tipo == 'productos':
+            cursor.execute("""
+                SELECT id_producto, nombre, precio, stock
+                FROM producto ORDER BY nombre
+            """)
+            filas = cursor.fetchall()
+            reportes_data = {
+                'headers': ['ID', 'Producto', 'Precio (S/)', 'Stock'],
+                'rows': [[r['id_producto'], r['nombre'],
+                          f"{float(r['precio'] or 0):.2f}", r['stock']] for r in filas],
+            }
+        elif tipo == 'inventario':
+            ini = (desde or 'now() - interval \'30 days\'')
+            params_inv = []
+            if desde:
+                ini = '%s'
+                params_inv.append(desde + 'T00:00:00')
+            sql = f"""
+                SELECT id_movimiento, id_producto, tipo, cantidad,
+                       precio_unitario, fecha
+                FROM inventario_movimiento
+                WHERE fecha >= {ini}
+                ORDER BY fecha DESC
+                LIMIT 500
+            """
+            cursor.execute(sql, params_inv)
+            filas = cursor.fetchall()
+            reportes_data = {
+                'headers': ['ID', 'Producto', 'Tipo', 'Cantidad', 'P.U. (S/)', 'Fecha'],
+                'rows': [[r['id_movimiento'], r['id_producto'], r['tipo'], r['cantidad'],
+                          f"{float(r['precio_unitario'] or 0):.2f}", r['fecha']] for r in filas],
+            }
+        else:
+            reportes_data = {'headers': ['Aviso'], 'rows': [['Tipo de reporte no válido.']]}
+    except Exception:
+        app.logger.exception("Error al generar reporte tipo=%s", tipo)
+        reportes_data = None
     finally:
         conn.close()
 
@@ -1715,6 +2379,8 @@ def carrito():
 @app.route('/carrito/agregar', methods=['POST'])
 @login_required
 def carrito_agregar():
+    if session.get('rol') != 'cliente':
+        return {'ok': False, 'error': 'Solo clientes pueden agregar productos al carrito.'}, 403
     data        = request.get_json()
     id_producto = int(data.get('id_producto', 0))
     cantidad    = int(data.get('cantidad', 1))
@@ -1742,43 +2408,45 @@ def carrito_agregar():
 @app.route('/procesar_pago', methods=['POST'])
 @login_required
 def procesar_pago():
-    # Simulación de pago: si hay items en session['ultimo_pedido'] o en session['carrito'], crear pedido si cliente
+    # Soporta tanto form POST clásico (pago.html: campo "metodo") como fetch JSON
     if session.get('rol') != 'cliente':
         flash("Solo clientes pueden procesar pagos.", "warning")
         return redirect(url_for('productos'))
 
-    # Preferir items del body si llegan (compatibilidad con pago.html)
-    items = session.get('ultimo_pedido') or []
-    if not items:
-        # intentar obtener desde session carrito dict -> transformar a lista
-        carrito = session.get('carrito', {})
-        items = []
-        for k, v in carrito.items():
-            items.append({
-                'id_producto': v.get('id_producto') or v.get('id'),
-                'cantidad': v.get('cantidad'),
-                'precio': v.get('precio')
-            })
+    data = request.get_json(silent=True) or request.form.to_dict()
 
+    # 1) Ítems: del body JSON si vienen, si no de la sesión (ultimo_pedido o carrito)
+    items = data.get('items')
+    if not items:
+        items = session.get('ultimo_pedido') or []
+    if not items:
+        carrito = session.get('carrito', {})
+        items = [{
+            'id_producto': v.get('id_producto') or v.get('id'),
+            'cantidad':    v.get('cantidad'),
+            'precio':      v.get('precio')
+        } for v in carrito.values()]
     if not items:
         flash("No hay items en el carrito para procesar.", "warning")
         return redirect(url_for('catalogo_cliente'))
 
-    # Reusar la lógica de carrito_confirmar_v2 para crear pedido (llamar internamente)
-    resp = carrito_confirmar_v2()  # devuelve dict o respuesta
-    # carrito_confirmar_v2 ya hizo commit y flash
-    # redirigir al cliente a catálogo o a detalle del pedido si id devuelto
+    # 2) Parámetros del formulario (pago.html) o del fetch JSON
+    metodo_pago      = data.get('metodo_pago') or data.get('metodo') or 'efectivo'
+    tipo_comprobante = data.get('tipo_comprobante') or 'boleta_simple'
+    ruc              = (data.get('ruc') or '').strip() or None
+    num_operacion    = (data.get('num_operacion') or '').strip() or None
+
+    resp = _confirmar_carrito(
+        items=items,
+        metodo_pago=metodo_pago,
+        tipo_comprobante=tipo_comprobante,
+        ruc=ruc,
+        num_operacion=num_operacion,
+    )
     if isinstance(resp, dict) and resp.get('ok') and resp.get('id_pedido'):
-        return redirect(url_for('catalogo_cliente'))
-    # si fue Response (JS fetch), intentar interpretar
-    try:
-        # si retornó flask Response con JSON
-        d = resp.get_json() if hasattr(resp, 'get_json') else {}
-        if d.get('ok') and d.get('id_pedido'):
-            return redirect(url_for('catalogo_cliente'))
-    except Exception:
-        pass
-    # fallback
+        flash("Tu pago fue registrado. El pedido quedó en estado pendiente.", "success")
+        return redirect(url_for('pedido_aceptado', id=resp['id_pedido']))
+    flash(resp.get('error') or 'No se pudo procesar el pago.', "danger")
     return redirect(url_for('catalogo_cliente'))
 
 
@@ -1786,6 +2454,7 @@ def procesar_pago():
 @app.route('/cambiar_clave', methods=['GET', 'POST'])
 @login_required
 def cambiar_clave():
+    es_cliente = session.get('rol') == 'cliente'
     if request.method == 'POST':
         nueva     = request.form['nueva']
         confirmar = request.form['confirmar']
@@ -1794,12 +2463,16 @@ def cambiar_clave():
         nueva_hash = bcrypt.generate_password_hash(nueva).decode('utf-8')
         conn   = get_connection_auth()
         cursor = conn.cursor()
-        cursor.execute("UPDATE usuario SET contrasena = %s WHERE id_usuario = %s",
-                       (nueva_hash, session['usuario_id']))
+        if es_cliente:
+            cursor.execute("UPDATE cliente SET contrasena = %s WHERE id_cliente = %s",
+                           (nueva_hash, session['usuario_id']))
+        else:
+            cursor.execute("UPDATE usuario SET contrasena = %s WHERE id_usuario = %s",
+                           (nueva_hash, session['usuario_id']))
         conn.commit()
         conn.close()
         flash("Contraseña actualizada correctamente.", "success")
-        return redirect(url_for('productos'))
+        return redirect(url_for('catalogo_cliente') if es_cliente else url_for('productos'))
     return render_template('cambiar_clave.html')
 
 
@@ -1845,12 +2518,17 @@ def registro_cliente():
     apellido   = request.form.get('apellido', '').strip()
     correo     = request.form.get('correo', '').strip()
     telefono   = request.form.get('telefono', '').strip()
+    direccion  = request.form.get('direccion', '').strip()
     contrasena = request.form.get('contrasena', '')
     confirmar  = request.form.get('confirmar', '')
 
     if not nombre or not correo or not contrasena:
         return render_template('login_cliente.html',
                                error='Nombre, correo y contraseña son obligatorios.',
+                               registro_activo=True)
+    if len(direccion) < 5:
+        return render_template('login_cliente.html',
+                               error='La dirección es obligatoria para registrarte (mínimo 5 caracteres).',
                                registro_activo=True)
     if contrasena != confirmar:
         return render_template('login_cliente.html',
@@ -1876,18 +2554,18 @@ def registro_cliente():
             # Registro pendiente de verificación: actualizar datos del formulario
             id_cliente = existente['id_cliente']
             cursor.execute("""
-                UPDATE cliente SET nombre=%s, apellido=%s, telefono=%s, contrasena=%s
+                UPDATE cliente SET nombre=%s, apellido=%s, telefono=%s, contrasena=%s, direccion=%s
                 WHERE id_cliente=%s
-            """, (nombre, apellido or None, telefono or None, hash_pw, id_cliente))
+            """, (nombre, apellido or '', telefono or None, hash_pw, direccion, id_cliente))
         else:
             # id_tipo_documento=1 (DNI) y nro_documento vacío ('') por defecto;
             # el formulario web no pide documento todavía
             cursor.execute("""
                 INSERT INTO cliente (nombre, apellido, email, telefono, contrasena,
-                                     id_tipo_documento, nro_documento, activo)
-                VALUES (%s, %s, %s, %s, %s, 1, '', FALSE)
+                                     id_tipo_documento, nro_documento, direccion, activo)
+                VALUES (%s, %s, %s, %s, %s, 1, '', %s, FALSE)
                 RETURNING id_cliente
-            """, (nombre, apellido or None, correo, telefono or None, hash_pw))
+            """, (nombre, apellido or '', correo, telefono or None, hash_pw, direccion))
             id_cliente = cursor.fetchone()['id_cliente']
 
         # Invalidar códigos anteriores de este cliente y guardar el nuevo (solo el hash)
@@ -1902,9 +2580,24 @@ def registro_cliente():
         conn.commit()
     except Exception as e:
         conn.rollback()
-        app.logger.error(f"Error en registro_cliente: {e}")
+        # ── Log detallado real (no engañar al usuario ni al debug) ──
+        import traceback
+        app.logger.error(
+            "Error en registro_cliente (correo=%s): %s\n%s",
+            correo, e, traceback.format_exc()
+        )
+        print(f"ERROR registro_cliente [{correo}]: {e}")
+        # Validación de datos / conflictos → mensaje específico
+        if 'already exists' in str(e).lower() or 'duplicate' in str(e).lower():
+            msg = 'Este correo o teléfono ya está registrado. Intenta iniciar sesión.'
+        elif 'not null' in str(e).lower():
+            msg = 'Faltan datos obligatorios para crear la cuenta. Completa todos los campos.'
+        elif 'verificacion_cuenta' in str(e).lower() or 'relation' in str(e).lower():
+            msg = 'Error interno: la tabla de verificación no existe. Contacta al administrador.'
+        else:
+            msg = 'No se pudo iniciar el registro (error interno). Contacta al administrador.'
         return render_template('login_cliente.html',
-                               error='No se pudo iniciar el registro. Intenta de nuevo.',
+                               error=msg,
                                registro_activo=True)
     finally:
         conn.close()
@@ -1920,20 +2613,30 @@ def registro_cliente():
     )
 
     if resultado == 'smtp_no_configurado':
-        # Modo desarrollo: mostrar el código en pantalla
+        # SMTP no configurado: modo desarrollo, mostrar el código en pantalla
         return render_template('login_cliente.html',
                                verificar_activo=True,
                                correo_verificar=correo,
                                codigo_visible=codigo,
                                aviso_smtp=True)
-    if resultado == 'smtp_auth':
+    if resultado in ('smtp_auth', 'smtp_error', 'error'):
+        # El código YA quedó almacenado en BD (transacción confirmada arriba).
+        # Para no dejar al usuario bloqueado, mostramos la pantalla de
+        # verificación con el código en pantalla + aviso de que el correo
+        # no se pudo enviar (SMTP mal configurado / credenciales inválidas).
+        app.logger.error(f"No se pudo enviar el correo de verificación a {correo} "
+                         f"(resultado: {resultado}). El código se muestra en pantalla.")
         return render_template('login_cliente.html',
-                               error='Error de autenticación con el correo. Contacta al administrador.',
-                               registro_activo=True)
-    if resultado:
-        return render_template('login_cliente.html',
-                               error='No se pudo enviar el correo de verificación. Intenta de nuevo.',
-                               registro_activo=True)
+                               verificar_activo=True,
+                               correo_verificar=correo,
+                               codigo_visible=codigo,
+                               aviso_smtp=True,
+                               aviso_smtp_motivo=(
+                                   'Credenciales SMTP inválidas (revisa SMTP_USER/SMTP_PASS '
+                                   'usando una contraseña de aplicación de Gmail).'
+                                   if resultado == 'smtp_auth'
+                                   else 'El servicio de correo presentó un error. Revisa el log del backend.'
+                               ))
 
     return render_template('login_cliente.html',
                            verificar_activo=True,
@@ -1965,7 +2668,7 @@ def verificar_registro():
 
         # Último código vigente no usado para ese cliente
         cursor.execute("""
-            SELECT id_verificacion, codigo_hash, expira_en
+            SELECT id_verificacion, codigo_hash, expira_en, intentos_fallidos
             FROM verificacion_cuenta
             WHERE id_cliente = %s AND usado = FALSE
             ORDER BY creado_en DESC LIMIT 1
@@ -1985,17 +2688,33 @@ def verificar_registro():
                                    verificar_activo=True,
                                    correo_verificar=correo)
 
+        # Bloqueo tras 5 intentos fallidos (mismo criterio que la recuperación de contraseña)
+        if verif['intentos_fallidos'] >= 5:
+            cursor.execute("UPDATE verificacion_cuenta SET usado = TRUE WHERE id_verificacion = %s",
+                           (verif['id_verificacion'],))
+            conn.commit()
+            return render_template('login_cliente.html',
+                                   error='Demasiados intentos fallidos. Regístrate de nuevo para recibir un código nuevo.',
+                                   verificar_activo=True,
+                                   correo_verificar=correo)
+
         try:
             coincide = bcrypt.check_password_hash(verif['codigo_hash'], codigo_ingresado)
         except (ValueError, TypeError):
             coincide = False
 
         if not coincide:
-            cursor.execute("UPDATE verificacion_cuenta SET intentos_fallidos = intentos_fallidos + 1 WHERE id_verificacion = %s",
-                           (verif['id_verificacion'],))
+            intentos = verif['intentos_fallidos'] + 1
+            cursor.execute("""
+                UPDATE verificacion_cuenta
+                SET intentos_fallidos = %s, usado = (CASE WHEN %s >= 5 THEN TRUE ELSE usado END)
+                WHERE id_verificacion = %s
+            """, (intentos, intentos, verif['id_verificacion']))
             conn.commit()
             return render_template('login_cliente.html',
-                                   error='Código incorrecto. Intenta de nuevo.',
+                                   error=('Demasiados intentos fallidos. Regístrate de nuevo '
+                                          'para recibir un código nuevo.' if intentos >= 5
+                                          else f'Código incorrecto. Te quedan {5 - intentos} intentos.'),
                                    verificar_activo=True,
                                    correo_verificar=correo)
 
@@ -2215,8 +2934,13 @@ def mis_pedidos():
     conn   = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
     pedidos_lista = []
-    PASOS = ['pendiente', 'procesando', 'enviado', 'entregado']
+    fases_orden = []
     try:
+        # Fases válidas leídas de la BD (misma fuente que el panel admin)
+        cursor.execute("SELECT nombre FROM estado_venta WHERE activo = TRUE ORDER BY orden")
+        fases_orden = [r['nombre'] for r in cursor.fetchall()]
+        fases_orden = [f for f in fases_orden if f != 'cancelado']
+        PASOS = fases_orden
         cursor.execute("""
             SELECT v.id_venta,
                    v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima' AS fecha,
@@ -2248,7 +2972,9 @@ def mis_pedidos():
         app.logger.exception("Error mis_pedidos: %s", e)
     finally:
         conn.close()
-    return render_template('mis_pedidos.html', pedidos=pedidos_lista)
+    if not fases_orden:
+        fases_orden = ['pendiente', 'confirmado', 'preparando', 'listo', 'entregado']
+    return render_template('mis_pedidos.html', pedidos=pedidos_lista, fases_orden=fases_orden)
 
 
 @app.route('/pedido_aceptado')
@@ -2264,12 +2990,15 @@ def pedido_aceptado():
         cursor = conn.cursor(dictionary=True)
         try:
             cursor.execute("""
-            SELECT ev.nombre AS estado FROM venta v
+            SELECT ev.nombre AS estado, v.id_cliente FROM venta v
             LEFT JOIN estado_venta ev ON v.id_estado_venta = ev.id_estado_venta
             WHERE v.id_venta = %s
         """, (id_pedido,))
             row = cursor.fetchone()
             if row:
+                # IDOR: este pedido solo pertenece al cliente logueado
+                if row.get('id_cliente') is not None and row['id_cliente'] != session.get('usuario_id'):
+                    abort(403)
                 estado = row.get('estado', 'pendiente')
         except Exception:
             pass
@@ -2282,16 +3011,25 @@ def pedido_aceptado():
 @login_required
 @escritura_required
 def pedido_cambiar_estado(id):
-    """Vendedor/Admin cambia el estado (fase) de un pedido."""
+    """Vendedor/Admin cambia el estado (fase) de un pedido.
+    Responde JSON si la petición es AJAX (X-Requested-With), o redirige
+    si llega desde un formulario clásico.
+    """
     conn_v   = get_connection_tienda()
     cursor_v = conn_v.cursor(dictionary=True)
     cursor_v.execute("SELECT nombre FROM estado_venta WHERE activo = TRUE ORDER BY orden")
     estados_validos = tuple(r['nombre'] for r in cursor_v.fetchall())
     conn_v.close()
-    nuevo_estado = request.form.get('estado', 'pendiente')
+
+    nuevo_estado = request.form.get('estado', '').strip()
+    is_ajax = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
+
     if nuevo_estado not in estados_validos:
+        if is_ajax:
+            return {'ok': False, 'error': f'Estado "{nuevo_estado}" no es válido.'}, 400
         flash('Estado no válido.', 'danger')
         return redirect(url_for('pedido_detalle', id=id))
+
     conn   = get_connection_tienda()
     cursor = conn.cursor()
     try:
@@ -2301,13 +3039,20 @@ def pedido_cambiar_estado(id):
             WHERE id_venta = %s
         """, (nuevo_estado, id))
         conn.commit()
+
+        if is_ajax:
+            return {'ok': True, 'estado': nuevo_estado, 'mensaje': f'Estado actualizado a "{nuevo_estado}".'}
+
         flash(f'Estado actualizado a "{nuevo_estado}".', 'success')
     except Exception as e:
         conn.rollback()
+        app.logger.error(f"Error al actualizar estado pedido #{id}: {e}")
+        if is_ajax:
+            return {'ok': False, 'error': f'Error de base de datos: {e}'}, 500
         flash(f'Error al actualizar estado: {e}', 'danger')
     finally:
         conn.close()
-    # Volver a la lista si el cambio vino desde /pedidos, sino al detalle
+
     ref = request.referrer or ''
     if '/pedidos?' in ref or ref.rstrip('/').endswith('/pedidos'):
         return redirect(url_for('pedidos'))
@@ -2318,14 +3063,20 @@ def pedido_cambiar_estado(id):
 @login_required
 def carrito_confirmar_v2():
     """Confirma el pedido guardando método de pago y generando comprobante."""
-    import random, string
-    data             = request.get_json() or {}
-    items            = data.get('items', [])
-    metodo_pago      = data.get('metodo_pago', 'efectivo')
-    tipo_comprobante = data.get('tipo_comprobante', 'boleta_simple')
-    ruc              = (data.get('ruc') or '').strip() or None
-    num_operacion    = (data.get('num_operacion') or '').strip() or None
+    data = request.get_json(silent=True) or request.form.to_dict()
+    return _confirmar_carrito(
+        items            = data.get('items') or [],
+        metodo_pago      = data.get('metodo_pago') or data.get('metodo') or 'efectivo',
+        tipo_comprobante = data.get('tipo_comprobante') or 'boleta_simple',
+        ruc              = (data.get('ruc') or '').strip() or None,
+        num_operacion    = (data.get('num_operacion') or '').strip() or None,
+    )
 
+
+def _confirmar_carrito(items, metodo_pago='efectivo', tipo_comprobante='boleta_simple',
+                       ruc=None, num_operacion=None):
+    """Lógica compartida de confirmación de carrito (pago + venta + detalle + comprobante)."""
+    import random, string
     if not items:
         return {'ok': False, 'error': 'Carrito vacío'}
     if session.get('rol') != 'cliente':
@@ -2338,9 +3089,11 @@ def carrito_confirmar_v2():
     cursor_val = conn_val.cursor(dictionary=True)
     ids_items  = {int(it.get('id_producto') or it.get('id') or 0) for it in items}
     cursor_val.execute(
-        "SELECT id_producto FROM producto WHERE id_producto = ANY(%s) AND activo = TRUE",
+        "SELECT id_producto, nombre, precio, stock FROM producto "
+        "WHERE id_producto = ANY(%s) AND activo = TRUE",
         (list(ids_items),))
-    ids_validos = {r['id_producto'] for r in cursor_val.fetchall()}
+    prods_validos = {r['id_producto']: r for r in cursor_val.fetchall()}
+    ids_validos = set(prods_validos)
     conn_val.close()
 
     ids_faltantes = ids_items - ids_validos
@@ -2375,7 +3128,9 @@ def carrito_confirmar_v2():
         """, (session['usuario_id'], num_operacion))
         id_venta = cursor.fetchone()[0]
         try:
-            # Si hay caja abierta, asociar el pago a la caja actual
+            # Pago en savepoint: si la tabla pago/tipo_pago no existe o falla,
+            # se revierte SOLO este bloque sin abortar la venta ni el detalle.
+            cursor.execute("SAVEPOINT sp_pago")
             cursor.execute("SELECT id_caja FROM caja WHERE estado = 'abierta' LIMIT 1")
             fila_caja  = cursor.fetchone()
             id_caja_a  = fila_caja[0] if fila_caja else None
@@ -2383,13 +3138,25 @@ def carrito_confirmar_v2():
                 INSERT INTO pago (id_venta, id_tipo_pago, id_caja, estado)
                 VALUES (%s, (SELECT id_tipo_pago FROM tipo_pago WHERE nombre = %s), %s, 'pendiente')
             """, (id_venta, metodo_db, id_caja_a))
-        except Exception:
-            pass  # tabla/columna de pago opcional; no bloquea el pedido
+        except Exception as e:
+            app.logger.warning("No se pudo registrar el pago del pedido %s (tabla opcional): %s",
+                               id_venta, e)
+            cursor.execute("ROLLBACK TO SAVEPOINT sp_pago")
 
         for it in items:
             id_producto = int(it.get('id_producto') or it.get('id') or 0)
-            cantidad    = int(it.get('cantidad', 1))
-            precio_unit = float(it.get('precio', 0) or 0)
+            cantidad    = int(it.get('cantidad', 1) or 1)
+            if cantidad <= 0:
+                return {'ok': False, 'error': 'Cantidad inválida en el carrito.'}
+            prod_info = prods_validos.get(id_producto)
+            if prod_info is None:
+                continue
+            if cantidad > (prod_info['stock'] or 0):
+                return {'ok': False,
+                        'error': f'Stock insuficiente de "{prod_info["nombre"]}" '
+                                 f'(disponible: {prod_info["stock"]} unidades).'}
+            # Precio del catálogo en BD (nunca el que envía el cliente)
+            precio_unit = float(prod_info['precio'])
             cursor.execute("""
                 INSERT INTO detalle_venta (id_venta, id_producto, cantidad, precio_unitario)
                 VALUES (%s, %s, %s, %s)
@@ -2401,12 +3168,15 @@ def carrito_confirmar_v2():
         # Generar número de comprobante y guardarlo
         num_comp = 'B' + str(id_venta).zfill(6) + '-' + ''.join(random.choices(string.digits, k=4))
         try:
+            cursor.execute("SAVEPOINT sp_comprobante")
             cursor.execute("""
                 INSERT INTO comprobante (id_venta, id_tipo_comprobante, numero, ruc)
                 VALUES (%s, (SELECT id_tipo_comprobante FROM tipo_comprobante WHERE nombre = %s), %s, %s)
             """, (id_venta, tipo_comp_db, num_comp, ruc))
-        except Exception:
-            pass  # tabla comprobante puede no existir; no es crítico
+        except Exception as e:
+            app.logger.warning("No se pudo generar el comprobante del pedido %s (tabla opcional): %s",
+                               id_venta, e)
+            cursor.execute("ROLLBACK TO SAVEPOINT sp_comprobante")
 
         conn.commit()
         session['carrito'] = {}

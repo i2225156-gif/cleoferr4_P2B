@@ -420,6 +420,7 @@ function actualizarContador() {
 
 // Flag global: está logueado como cliente?
 const estaLogueado = {{ 'true' if session.usuario_id and session.rol == 'cliente' else 'false' }};
+const CSRF_TOKEN = {{ csrf_token|tojson }};
 
 function agregarAlCarrito(id, nombre, precio, btn) {
     let carrito = getCarrito();
@@ -440,7 +441,7 @@ function agregarAlCarrito(id, nombre, precio, btn) {
     if (estaLogueado) {
         fetch('/carrito/agregar', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json', 'X-CSRFToken': CSRF_TOKEN },
             body: JSON.stringify({ id_producto: id, cantidad: 1 })
         });
     }
@@ -589,7 +590,7 @@ function modalAgregarCarrito() {
     if (estaLogueado) {
         fetch('/carrito/agregar', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json', 'X-CSRFToken': CSRF_TOKEN },
             body: JSON.stringify({ id_producto: mpData.id, cantidad: cant })
         });
     }

@@ -64,9 +64,11 @@
             <span class="badge
                 {% if pedido.estado == 'pendiente' %}bg-warning text-dark
                 {% elif pedido.estado == 'confirmado' %}bg-info
-                {% elif pedido.estado == 'preparando' %}bg-primary
+                {% elif pedido.estado in ('procesando', 'preparando') %}bg-primary
+                {% elif pedido.estado == 'enviado' %}bg-info
                 {% elif pedido.estado == 'listo' %}bg-success
                 {% elif pedido.estado == 'entregado' %}bg-dark
+                {% elif pedido.estado == 'cancelado' %}bg-danger
                 {% else %}bg-secondary{% endif %} px-3 py-2" style="font-size:0.85rem">
                 {{ (pedido.estado or 'pendiente')|upper }}
             </span>
@@ -83,9 +85,12 @@
                             <i class="fa fa-check"></i>
                         {% elif fase == 'pendiente' %}<i class="fa fa-clock"></i>
                         {% elif fase == 'confirmado' %}<i class="fa fa-check-circle"></i>
+                        {% elif fase == 'procesando' %}<i class="fa fa-cog"></i>
                         {% elif fase == 'preparando' %}<i class="fa fa-box"></i>
+                        {% elif fase == 'enviado' %}<i class="fa fa-truck"></i>
                         {% elif fase == 'listo' %}<i class="fa fa-store"></i>
                         {% elif fase == 'entregado' %}<i class="fa fa-handshake"></i>
+                        {% elif fase == 'cancelado' %}<i class="fa fa-ban"></i>
                         {% endif %}
                     </div>
                     <div class="fase-nombre">{{ fase }}</div>
@@ -93,23 +98,34 @@
             {% endfor %}
         </div>
 
-        <!-- Botones para cambiar fase (vendedor/admin) -->
+        <!-- Botones para cambiar fase (vendedor/admin). Una venta LOCAL ya
+             cobrada/entregada no pasa por despacho: solo se muestra un aviso. -->
+        {% if pedido.tipo_venta == 'local' and pedido.estado == 'entregado' %}
+        <div class="alert alert-success mb-0 py-2" style="font-size:0.88rem">
+            <i class="fa fa-store me-1"></i>Venta local completada: el pago fue confirmado
+            y el producto se entregó en el mostrador. No requiere despacho ni seguimiento de entrega.
+        </div>
+        {% else %}
         <div class="d-flex flex-wrap gap-2 align-items-center">
             <span class="fw-semibold" style="font-size:0.85rem">Cambiar a:</span>
-            {% for fase in ['pendiente','confirmado','preparando','listo','entregado'] %}
+            {% for fase in fases_orden %}
             <form method="POST" action="/pedidos/{{ pedido.id_venta }}/estado" style="display:inline">
                 <input type="hidden" name="estado" value="{{ fase }}">
                 <button type="submit" class="btn-fase {% if pedido.estado == fase %}activo{% endif %}">
                     {% if fase == 'pendiente' %}<i class="fa fa-clock me-1"></i>
                     {% elif fase == 'confirmado' %}<i class="fa fa-check-circle me-1"></i>
+                    {% elif fase == 'procesando' %}<i class="fa fa-cog me-1"></i>
                     {% elif fase == 'preparando' %}<i class="fa fa-box me-1"></i>
+                    {% elif fase == 'enviado' %}<i class="fa fa-truck me-1"></i>
                     {% elif fase == 'listo' %}<i class="fa fa-store me-1"></i>
                     {% elif fase == 'entregado' %}<i class="fa fa-handshake me-1"></i>
+                    {% elif fase == 'cancelado' %}<i class="fa fa-ban me-1"></i>
                     {% endif %}{{ fase|capitalize }}
                 </button>
             </form>
             {% endfor %}
         </div>
+        {% endif %}
     </div>
 </div>
 
@@ -122,6 +138,8 @@
                 <table class="table table-sm mb-0" style="font-size:0.88rem">
                     <tr><td class="text-muted fw-semibold" width="40%">Cliente</td><td>{{ pedido.cliente_nombre or '–' }}</td></tr>
                     <tr><td class="text-muted fw-semibold">Teléfono</td><td>{{ pedido.cliente_telefono or '–' }}</td></tr>
+                    {% if pedido.cliente_documento %}<tr><td class="text-muted fw-semibold">Doc.</td><td>{{ pedido.cliente_documento }}</td></tr>{% endif %}
+                    {% if pedido.cliente_direccion %}<tr><td class="text-muted fw-semibold">Dirección</td><td>{{ pedido.cliente_direccion }}</td></tr>{% endif %}
                     <tr><td class="text-muted fw-semibold">Responsable</td><td>{{ pedido.responsable or '–' }}</td></tr>
                     <tr><td class="text-muted fw-semibold">Tipo</td><td>{{ pedido.tipo_venta or 'online' }}</td></tr>
                 </table>
@@ -136,9 +154,15 @@
                 <table class="table table-sm mb-0" style="font-size:0.88rem">
                     <tr><td class="text-muted fw-semibold" width="40%">Tipo</td><td>{{ comprobante.tipo|capitalize }} {{ comprobante.tipo_boleta or '' }}</td></tr>
                     <tr><td class="text-muted fw-semibold">Número</td><td>{{ comprobante.numero or '–' }}</td></tr>
-                    {% if comprobante.ruc_cliente %}<tr><td class="text-muted fw-semibold">RUC</td><td>{{ comprobante.ruc_cliente }}</td></tr>{% endif %}
+                    {% if comprobante.serie %}<tr><td class="text-muted fw-semibold">Serie</td><td>{{ comprobante.serie }}</td></tr>{% endif %}
+                    {% if comprobante.ruc_cliente %}
+                    <tr><td class="text-muted fw-semibold">{% if comprobante.tipo == 'factura' %}RUC{% elif pedido.cliente_documento %}DNI{% endif %}</td><td>{{ comprobante.ruc_cliente }}</td></tr>
+                    {% endif %}
                     <tr><td class="text-muted fw-semibold">Fecha</td><td>{{ comprobante.fecha_emision.strftime('%d/%m/%Y') if comprobante.fecha_emision else '–' }}</td></tr>
                 </table>
+                <span class="badge" style="background:#fff3cd;color:#856404;border:1px solid #ffc107;margin-top:8px">
+                    <i class="fa fa-flask me-1"></i>Comprobante de PRUEBA – no homologado SUNAT
+                </span>
                 {% else %}
                 <p class="text-muted mb-0" style="font-size:0.88rem">Sin comprobante generado</p>
                 {% endif %}

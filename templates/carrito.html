@@ -690,6 +690,8 @@ function irPaso3() {
     irPaso(3);
 }
 
+const CSRF_TOKEN = {{ csrf_token|tojson }};
+
 function confirmarPedidoFinal() {
     const carrito = getCarrito();
     if (carrito.length === 0) return;
@@ -709,7 +711,8 @@ function confirmarPedidoFinal() {
             tipo_comprobante: tipoComprobante,
             ruc: ruc,
             dni: dni,
-            num_operacion: numOp
+            num_operacion: numOp,
+            csrf_token: CSRF_TOKEN
         })
     })
     .then(r => r.json())

@@ -103,6 +103,8 @@
 </div>
 
 <form method="POST" action="/ventas/nueva" id="formVenta" onsubmit="return validarVenta()">
+    <input type="hidden" name="venta_token" value="{{ venta_token }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
 <div class="pos-wrap">
 
     <!-- ══════ IZQUIERDA: buscador + catálogo ══════ -->
@@ -143,12 +145,23 @@
 
             <div class="pos-controles">
                 <label class="form-label">Cliente</label>
-                <select name="id_cliente" class="form-select form-select-sm mb-2">
-                    <option value="">— Venta anónima —</option>
-                    {% for c in clientes %}
-                    <option value="{{ c.id_cliente }}">{{ c.nombre }} {% if c.telefono %}({{ c.telefono }}){% endif %}</option>
-                    {% endfor %}
-                </select>
+                <div class="input-group input-group-sm mb-2">
+                    <select name="id_cliente" id="selectCliente" class="form-select">
+                        <option value="">— Venta anónima —</option>
+                        {% for c in clientes %}
+                        <option value="{{ c.id_cliente }}">{{ c.nombre }} {% if c.telefono %}({{ c.telefono }}){% endif %}</option>
+                        {% endfor %}
+                    </select>
+                    <button type="button" class="btn btn-outline-primary"
+                            data-bs-toggle="modal" data-bs-target="#modalClientePos"
+                            title="Registrar cliente por DNI/RUC">
+                        <i class="fa fa-user-plus"></i>
+                    </button>
+                </div>
+                <div id="compResumen"></div>
+                <input type="hidden" name="comp_tipo" id="compTipo">
+                <input type="hidden" name="comp_doc" id="compDoc">
+                <input type="hidden" name="comp_nombre" id="compNombre">
 
                 <label class="form-label">Método de pago</label>
                 <div class="pos-metodos">
@@ -178,6 +191,77 @@
 <!-- inputs ocultos de items (los genera JS al hacer submit) -->
 <div id="inputsOcultos"></div>
 </form>
+
+<!-- ══ Modal: registrar cliente por DNI/RUC + tipo de comprobante ══ -->
+<div class="modal fade" id="modalClientePos" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="fa fa-user-plus me-2"></i>Cliente y comprobante</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+
+        <div class="d-flex gap-2 mb-3">
+          <button type="button" class="btn btn-sm flex-fill btn-outline-primary comp-tab active"
+                  onclick="setTipoCli('boleta')">Boleta (DNI)</button>
+          <button type="button" class="btn btn-sm flex-fill btn-outline-primary comp-tab"
+                  onclick="setTipoCli('factura')">Factura (RUC)</button>
+        </div>
+
+        <!-- Boleta: DNI + nombre -->
+        <div id="camposBoleta">
+          <div class="input-group mb-2">
+            <input type="text" id="campoDni" class="form-control" maxlength="8"
+                   placeholder="DNI (8 dígitos)" inputmode="numeric">
+            <button type="button" class="btn btn-outline-secondary" onclick="consultarDocCli()">
+              <i class="fa fa-search me-1"></i>Consultar
+            </button>
+          </div>
+          <div class="mb-2">
+            <input type="text" id="campoNombreCli" class="form-control"
+                   placeholder="Nombre completo *" maxlength="60">
+          </div>
+          <div class="mb-2">
+            <input type="text" id="campoTelefonoCli" class="form-control" maxlength="9"
+                   placeholder="Teléfono (9 dígitos, opcional)" inputmode="numeric">
+          </div>
+        </div>
+
+        <!-- Factura: RUC + razon social + direccion fiscal -->
+        <div id="camposFactura" style="display:none">
+          <div class="input-group mb-2">
+            <input type="text" id="campoRuc" class="form-control" maxlength="11"
+                   placeholder="RUC (11 dígitos, inicia 10/20)" inputmode="numeric">
+            <button type="button" class="btn btn-outline-secondary" onclick="consultarDocCli()">
+              <i class="fa fa-search me-1"></i>Consultar
+            </button>
+          </div>
+          <div class="mb-2">
+            <input type="text" id="campoRazonCli" class="form-control"
+                   placeholder="Razon social *" maxlength="100">
+          </div>
+          <div class="mb-2">
+            <input type="text" id="campoDireccionCli" class="form-control"
+                   placeholder="Direccion fiscal *" maxlength="120">
+          </div>
+          <div class="mb-2">
+            <input type="text" id="campoTelefonoCliF" class="form-control" maxlength="9"
+                   placeholder="Telefono (9 digitos, opcional)" inputmode="numeric">
+          </div>
+        </div>
+
+        <div id="clientePosFeedback" style="font-size:0.85rem"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancelar</button>
+        <button type="button" class="btn btn-primary" onclick="guardarClientePos()">
+          <i class="fa fa-save me-1"></i>Guardar y usar
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
 
 <script>
 const PRODUCTOS = {{ productos | tojson }};
@@ -284,7 +368,15 @@ document.querySelectorAll('.pos-metodos .metodo').forEach(el => {
 });
 
 // ── Al cobrar: generar inputs ocultos id_producto[] / cantidad[] ──
+// `cobrando` bloquea el botón mientras el POST está en vuelo para evitar
+// dobles envíos por doble clic (refuerzo al token anti doble cobro del backend).
+let cobrando = false;
+function bloquearCobro() {
+    const btn = document.getElementById('btnCobrar');
+    if (btn) { btn.disabled = true; btn.textContent = 'Procesando...'; }
+}
 function validarVenta() {
+    if (cobrando) return false;
     const ids = Object.keys(carrito);
     if (ids.length === 0) return false;
     const cont = document.getElementById('inputsOcultos');
@@ -297,9 +389,125 @@ function validarVenta() {
         inp2.type = 'hidden'; inp2.name = 'cantidad[]';  inp2.value = it.cantidad;
         cont.appendChild(inp1); cont.appendChild(inp2);
     }
+    cobrando = true;
+    setTimeout(bloquearCobro, 0);
     return true;
 }
 
 renderCatalogo();
+
+// ══ Cliente por DNI/RUC + comprobante (modal POS) ═══════════════════════════
+const TOKEN_SUNAT = 'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJlbWFpbCI6ImkyNTEzNzAyQGNvbnRpbmVudGFsLmVkdS5wZSJ9.o02LSzKdddnW-h9XO-sf5hFbquw5vroU6ZAoFhbl9mY';
+const BASE_SUNAT  = 'https://dniruc.apisperu.com/api/v1';
+const CSRF_TOKEN  = {{ csrf_token|tojson }};
+let tipoCli = 'boleta';
+let renNombres = '', renApellidos = '';   // datos RENIEC (nombres / apellidos) cuando la API responde
+
+function setTipoCli(t) {
+    tipoCli = t;
+    document.getElementById('camposBoleta').style.display  = t === 'boleta' ? 'block' : 'none';
+    document.getElementById('camposFactura').style.display = t === 'factura' ? 'block' : 'none';
+    document.querySelectorAll('.comp-tab').forEach(b => {
+        b.classList.toggle('active', b.innerText.indexOf(t === 'boleta' ? 'Boleta' : 'Factura') !== -1);
+    });
+    const fb = document.getElementById('clientePosFeedback');
+    fb.textContent = ''; fb.className = '';
+}
+
+function setCliMsg(ok, texto, esInfo) {
+    const fb = document.getElementById('clientePosFeedback');
+    fb.textContent = texto;
+    fb.className = 'alert ' + (ok ? 'alert-success' : (esInfo ? 'alert-info' : 'alert-danger')) + ' p-2 mt-2';
+}
+
+// Consulta RENIEC (DNI) / SUNAT (RUC) — misma API ApisPeru que cliente_form.html
+async function consultarDocCli() {
+    const num  = (document.getElementById('campoDni').value || document.getElementById('campoRuc').value).trim();
+    if (!num) return;
+    setCliMsg(true, 'Consultando...', true);
+    try {
+        const url  = `${BASE_SUNAT}/${tipoCli === 'boleta' ? 'dni' : 'ruc'}/${num}?token=${TOKEN_SUNAT}`;
+        const resp = await fetch(url, { headers: { 'Accept': 'application/json' } });
+        const data = await resp.json().catch(() => null);
+        if (!data) { setCliMsg(false, 'La API no respondió. Ingresa los datos manualmente.'); return; }
+
+        if (tipoCli === 'boleta') {
+            renNombres   = data.nombres || data.nombre || '';
+            renApellidos = ((data.apellidoPaterno || data.apellido_paterno || '') + ' ' +
+                            (data.apellidoMaterno || data.apellido_materno || '')).trim();
+            const completo = [renNombres, renApellidos].filter(Boolean).join(' ');
+            if (completo) {
+                document.getElementById('campoNombreCli').value = completo;
+                setCliMsg(true, 'DNI encontrado en RENIEC.');
+            } else {
+                renNombres = ''; renApellidos = '';
+                setCliMsg(false, 'DNI NO encontrado en RENIEC. Ingresa el nombre manualmente.');
+            }
+        } else {
+            const razonSocial = data.razonSocial || data.razon_social || '';
+            const direccion   = data.direccion  || data.domicilioFiscal || '';
+            if (razonSocial) {
+                document.getElementById('campoRazonCli').value = razonSocial;
+                if (direccion) document.getElementById('campoDireccionCli').value = direccion;
+                setCliMsg(true, 'RUC encontrado en SUNAT.');
+            } else {
+                setCliMsg(false, 'RUC NO encontrado en SUNAT. Ingresa los datos manualmente.');
+            }
+        }
+    } catch (err) {
+        setCliMsg(false, 'Error de conexión. Ingresa los datos manualmente.');
+    }
+}
+
+async function guardarClientePos() {
+    const esBoleta = tipoCli === 'boleta';
+    const payload = { tipo: tipoCli, csrf_token: CSRF_TOKEN };
+
+    if (esBoleta) {
+        payload.dni = (document.getElementById('campoDni').value || '').trim();
+        payload.nombre = renNombres || (document.getElementById('campoNombreCli').value || '').trim();
+        payload.apellido = renApellidos;
+        payload.telefono = (document.getElementById('campoTelefonoCli').value || '').trim();
+    } else {
+        payload.ruc = (document.getElementById('campoRuc').value || '').trim();
+        payload.nombre = (document.getElementById('campoRazonCli').value || '').trim();
+        payload.direccion = (document.getElementById('campoDireccionCli').value || '').trim();
+        payload.telefono = (document.getElementById('campoTelefonoCliF').value || '').trim();
+    }
+
+    try {
+        const resp = await fetch('/clientes/registrar_pos', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        const data = await resp.json();
+        if (!data.ok) { setCliMsg(false, data.error || 'No se pudo guardar.'); return; }
+
+        const select = document.getElementById('selectCliente');
+        const existe = [...select.options].some(o => String(o.value) === String(data.id_cliente));
+        if (!existe) {
+            const opt = document.createElement('option');
+            opt.value = data.id_cliente;
+            opt.textContent = data.nombre + (payload.telefono ? ' (' + payload.telefono + ')' : '');
+            select.appendChild(opt);
+        }
+        select.value = data.id_cliente;
+
+        document.getElementById('compTipo').value   = tipoCli;
+        document.getElementById('compDoc').value    = esBoleta ? payload.dni : payload.ruc;
+        document.getElementById('compNombre').value = data.nombre;
+        document.getElementById('compResumen').innerHTML =
+            '<span class="badge" style="background:#28a745;color:white">' +
+            (esBoleta ? 'Boleta B001 – DNI ' : 'Factura F001 – RUC ') + document.getElementById('compDoc').value +
+            ' · ' + data.nombre + '</span>';
+        setCliMsg(true, data.ya_existia
+            ? 'Cliente ya existía con ese documento. Se vinculó a la venta.'
+            : 'Cliente registrado y vinculado a la venta.');
+        setTimeout(() => bootstrap.Modal.getInstance(document.getElementById('modalClientePos')).hide(), 700);
+    } catch (err) {
+        setCliMsg(false, 'No se pudo conectar con el servidor.');
+    }
+}
 </script>
 {% endblock %}

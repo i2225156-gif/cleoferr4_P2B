@@ -339,7 +339,7 @@
 
 <nav class="navbar navbar-cleoferr navbar-expand-lg">
   <div class="container-fluid">
-    <a class="navbar-brand-custom" href="/productos">
+    <a class="navbar-brand-custom" href="{% if session.rol == 'cliente' %}/catalogo{% else %}/productos{% endif %}">
       <div align="center">
         <img src="{{ url_for('static', filename='img/logo-ic.jpeg') }}" 
              alt="Cleoferr Logo" 
@@ -377,11 +377,9 @@
                 <i class="fa fa-user me-1"></i>{{ session.nombre }}
             </span>
             <span class="badge-rol">{{ session.rol }}</span>
-            {% if session.rol != 'cliente' %}
-                <a class="btn-nav" href="/cambiar_clave">
-                    <i class="fa fa-key me-1"></i>Clave
-                </a>
-            {% endif %}
+            <a class="btn-nav" href="/cambiar_clave">
+                <i class="fa fa-key me-1"></i>Clave
+            </a>
             <button id="btnTema" onclick="toggleTema()" title="Cambiar tema">
                 <i class="fa fa-moon" id="iconTema"></i>
             </button>

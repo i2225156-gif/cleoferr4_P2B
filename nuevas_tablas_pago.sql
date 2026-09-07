@@ -27,3 +27,12 @@ CREATE TABLE IF NOT EXISTS `comprobante` (
 ALTER TABLE `venta`
   MODIFY COLUMN `estado` ENUM('pendiente','confirmado','preparando','listo','entregado','cancelado') DEFAULT 'pendiente';
 
+-- 4. Comprobantes INTERNOS (fase de prueba, sin integración SUNAT real)
+--    - `serie`: B001 (boleta) | F001 (factura), mismo patrón de numeración
+--      del flujo existente.
+--    - `estado_sunat`: 'no_aplica' = comprobante interno de prueba; cuando se
+--      conecte un PSE (Nubefact/Facturador SUNAT) pasará a 'pendiente'/'enviado'.
+ALTER TABLE `comprobante`
+  ADD COLUMN IF NOT EXISTS `serie` VARCHAR(4) DEFAULT NULL,
+  ADD COLUMN IF NOT EXISTS `estado_sunat` ENUM('pendiente','no_aplica','enviado') DEFAULT 'no_aplica';
+
