@@ -1,0 +1,8 @@
+Flask
+Flask-Bcrypt
+Flask-SQLAlchemy
+SQLAlchemy
+python-dotenv
+psycopg2-binary
+openpyxl
+bcrypt

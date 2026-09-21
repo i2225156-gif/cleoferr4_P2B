@@ -555,9 +555,7 @@ function seleccionarComprobante(tipo) {
     }
 }
 
-// Auto-consultar RUC cuando tiene 11 dígitos (API SUNAT)
-const TOKEN_SUNAT = 'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJlbWFpbCI6ImkyNTEzNzAyQGNvbnRpbmVudGFsLmVkdS5wZSJ9.o02LSzKdddnW-h9XO-sf5hFbquw5vroU6ZAoFhbl9mY';
-const BASE_SUNAT = 'https://dniruc.apisperu.com/api/v1';
+// Auto-consultar RUC cuando tiene 11 dígitos (vía endpoint propio del backend)
 
 document.addEventListener('DOMContentLoaded', function() {
     const inputRuc = document.getElementById('inputRuc');
@@ -572,7 +570,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 feedback.innerHTML = '<i class="fa fa-spinner fa-spin me-1"></i>Consultando SUNAT...';
                 rucDatos.style.display = 'none';
                 rucError.style.display = 'none';
-                fetch(`${BASE_SUNAT}/ruc/${ruc}?token=${TOKEN_SUNAT}`)
+                fetch(`/api/consultar_ruc/${ruc}`)
                     .then(r => r.json())
                     .then(d => {
                         const razonSocial = d.razonSocial || d.razon_social || d.nombre || '';
@@ -623,7 +621,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 feedback.innerHTML = '<i class="fa fa-spinner fa-spin me-1"></i>Consultando RENIEC...';
                 dniDatos.style.display = 'none';
                 dniError.style.display = 'none';
-                fetch(`${BASE_SUNAT}/dni/${dni}?token=${TOKEN_SUNAT}`)
+                fetch(`/api/consultar_dni/${dni}`)
                     .then(r => r.json())
                     .then(d => {
                         const nombres = d.nombres || d.nombre || '';
@@ -714,13 +712,25 @@ function confirmarPedidoFinal() {
     })
     .then(r => r.json())
     .then(d => {
+        // Ítems que la BD ya no reconoce como válidos: retirarlos del carrito
+        const excluidos = d.excluidos || [];
+        if (excluidos.length > 0) {
+            const idsExcl = new Set(excluidos.map(e => e.id_producto));
+            saveCarrito(getCarrito().filter(i => !idsExcl.has(i.id)));
+            const detalle = excluidos.map(e => `• ${e.nombre}: ${e.motivo}`).join('\n');
+            if (d.ok) {
+                alert('Pedido registrado, pero estos productos fueron excluidos:\n' + detalle);
+            } else {
+                alert(d.error + '\n\nProductos excluidos del carrito:\n' + detalle);
+            }
+        }
         if (d.ok) {
             localStorage.removeItem('carrito_cleoferr');
             const idPedido = d.id_pedido || '';
             // cerrar modal y redirigir a pedido aceptado
             bootstrap.Modal.getInstance(document.getElementById('modalPago')).hide();
             window.location.href = '/pedido_aceptado' + (idPedido ? '?id=' + idPedido : '');
-        } else {
+        } else if (excluidos.length === 0) {
             alert('Error al procesar el pedido: ' + (d.error || 'intenta de nuevo'));
         }
     })
