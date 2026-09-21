@@ -27,3 +27,34 @@ CREATE TABLE IF NOT EXISTS comprobante (
 );
 
 CREATE INDEX IF NOT EXISTS idx_comprobante_venta ON comprobante (id_venta);
+
+-- 3. Estados ampliados de pedido en el catálogo estado_venta (BD TIENDA).
+--    app.py lee los estados válidos de esta tabla (ORDER BY orden), así que
+--    basta con insertarlos para habilitar procesando/enviado/cancelado sin
+--    tocar código. Idempotente: no duplica si ya existen.
+INSERT INTO estado_venta (nombre, orden, activo)
+SELECT v.nombre, v.orden, TRUE
+FROM (VALUES
+    ('pendiente',  1),
+    ('confirmado', 2),
+    ('procesando', 3),
+    ('enviado',    4),
+    ('entregado',  5),
+    ('cancelado',  6)
+) AS v(nombre, orden)
+WHERE NOT EXISTS (SELECT 1 FROM estado_venta e WHERE e.nombre = v.nombre);
+
+-- 4. Tipos de comprobante usados por las numeraciones B/F (BD TIENDA)
+INSERT INTO tipo_comprobante (nombre)
+SELECT v.nombre
+FROM (VALUES ('boleta'), ('factura')) AS v(nombre)
+WHERE NOT EXISTS (SELECT 1 FROM tipo_comprobante t WHERE t.nombre = v.nombre);
+
+-- 5. Comprobantes INTERNOS (fase de prueba, sin integración SUNAT real)
+--    - `serie`: B001 (boleta) | F001 (factura).
+--    - `estado_sunat`: 'no_aplica' = comprobante interno de prueba; cuando se
+--      conecte un PSE (Nubefact/Facturador SUNAT) pasará a 'pendiente'/'enviado'.
+ALTER TABLE comprobante
+  ADD COLUMN IF NOT EXISTS serie VARCHAR(4),
+  ADD COLUMN IF NOT EXISTS estado_sunat VARCHAR(12) DEFAULT 'no_aplica'
+    CHECK (estado_sunat IN ('pendiente','no_aplica','enviado'));

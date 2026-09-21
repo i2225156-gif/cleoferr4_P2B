@@ -1308,9 +1308,13 @@ def pedidos():
             estado = ped.get('estado') or 'pendiente'
             ped['idx_actual'] = PASOS.index(estado) if estado in PASOS else -1
             ped['progreso'] = int((ped['idx_actual'] + 1) * 20) if ped['idx_actual'] >= 0 else 0
+            # Venta local ya cobrada: NO aplica el flujo de despacho/entrega.
+            ped['es_local_entregado'] = (ped.get('tipo_venta') == 'local' and estado == 'entregado')
             nombre   = ped.get('cliente_nombre') or 'Cliente'
             telefono = (ped.get('cliente_telefono') or '').strip()
-            if telefono:
+            # El aviso por WhatsApp ("pedido procesado y listo") es del flujo
+            # ONLINE (delivery). Las ventas locales se entregan en mostrador.
+            if telefono and ped.get('tipo_venta') != 'local':
                 from urllib.parse import quote
                 if telefono.startswith('+'):
                     telefono = telefono[1:]
@@ -1487,10 +1491,11 @@ def venta_nueva_guardar():
                 doc_cliente = None
             num_comp = _siguiente_numero_comprobante(cursor, tipo_comp_db)
             cursor.execute("""
-                INSERT INTO comprobante (id_venta, id_tipo_comprobante, numero, ruc)
-                VALUES (%s, (SELECT id_tipo_comprobante FROM tipo_comprobante WHERE nombre = %s), %s, %s)
+                INSERT INTO comprobante (id_venta, id_tipo_comprobante, numero, ruc, serie)
+                VALUES (%s, (SELECT id_tipo_comprobante FROM tipo_comprobante WHERE nombre = %s), %s, %s, %s)
             """, (id_venta, tipo_comp_db, num_comp,
-                  doc_cliente if tipo_comp_db == 'factura' else None))
+                  doc_cliente if tipo_comp_db == 'factura' else None,
+                  'F001' if tipo_comp_db == 'factura' else 'B001'))
 
         conn.commit()
         flash(f'Venta #{id_venta} registrada correctamente.', 'success')
@@ -1855,11 +1860,13 @@ def pedido_detalle(id):
             cursor_a = conn_a.cursor(dictionary=True)
             if pedido.get('id_cliente'):
                 cursor_a.execute(
-                    "SELECT nombre, apellido, telefono FROM cliente WHERE id_cliente = %s",
+                    "SELECT nombre, apellido, telefono, nro_documento, direccion FROM cliente WHERE id_cliente = %s",
                     (pedido['id_cliente'],))
                 cli = cursor_a.fetchone() or {}
-                pedido['cliente_nombre']   = (f"{cli.get('nombre') or ''} {cli.get('apellido') or ''}").strip()
-                pedido['cliente_telefono'] = cli.get('telefono')
+                pedido['cliente_nombre']    = (f"{cli.get('nombre') or ''} {cli.get('apellido') or ''}").strip()
+                pedido['cliente_telefono']  = cli.get('telefono')
+                pedido['cliente_documento'] = (cli.get('nro_documento') or '').strip() or None
+                pedido['cliente_direccion'] = (cli.get('direccion') or '').strip() or None
             if pedido.get('id_usuario_vendedor'):
                 cursor_a.execute(
                     "SELECT nombres FROM usuario WHERE id_usuario = %s",
@@ -1879,17 +1886,31 @@ def pedido_detalle(id):
             comprobante = cursor.fetchone()
         except Exception:
             comprobante = None
-    except Exception as e:
-        print(f"ERROR pedido_detalle: {e}")
+    except Exception:
+        app.logger.exception("Error pedido_detalle %s", id)
     finally:
         conn.close()
+    # Fases válidas leídas de la BD (misma fuente que el panel admin y el
+    # cliente), para que el timeline siempre muestre nombres consistentes.
+    PASOS = []
+    try:
+        conn_f   = get_connection_tienda()
+        cursor_f = conn_f.cursor(dictionary=True)
+        cursor_f.execute("SELECT nombre FROM estado_venta WHERE activo = TRUE ORDER BY orden")
+        PASOS = [r['nombre'] for r in cursor_f.fetchall()]
+        conn_f.close()
+    except Exception:
+        PASOS = []
+    PASOS = [f for f in PASOS if f != 'cancelado']
+    if not PASOS:
+        PASOS = ['pendiente', 'procesando', 'enviado', 'entregado']
     # Calcular idx_actual en Python para evitar el error .index() en Jinja2
-    PASOS = ['pendiente', 'procesando', 'enviado', 'entregado']
     estado_actual = (pedido.get('estado') or 'pendiente') if pedido else 'pendiente'
     idx_actual = PASOS.index(estado_actual) if estado_actual in PASOS else 0
     return render_template('pedido_detalle.html', pedido=pedido, items=items,
                            comprobante=comprobante, id=id,
-                           idx_actual=idx_actual, fases_orden=PASOS)
+                           idx_actual=idx_actual, fases_orden=PASOS,
+                           estados=PASOS)
 
 @app.route('/reportes')
 @login_required
@@ -2144,12 +2165,17 @@ def registro_cliente():
     apellido   = request.form.get('apellido', '').strip()
     correo     = request.form.get('correo', '').strip()
     telefono   = request.form.get('telefono', '').strip()
+    direccion  = request.form.get('direccion', '').strip()
     contrasena = request.form.get('contrasena', '')
     confirmar  = request.form.get('confirmar', '')
 
     if not nombre or not correo or not contrasena:
         return render_template('login_cliente.html',
                                error='Nombre, correo y contraseña son obligatorios.',
+                               registro_activo=True)
+    if len(direccion) < 5:
+        return render_template('login_cliente.html',
+                               error='La dirección es obligatoria para registrarte (mínimo 5 caracteres).',
                                registro_activo=True)
     if contrasena != confirmar:
         return render_template('login_cliente.html',
@@ -2175,9 +2201,9 @@ def registro_cliente():
             # Registro pendiente de verificación: actualizar datos del formulario
             id_cliente = existente['id_cliente']
             cursor.execute("""
-                UPDATE cliente SET nombre=%s, apellido=%s, telefono=%s, contrasena=%s
+                UPDATE cliente SET nombre=%s, apellido=%s, telefono=%s, contrasena=%s, direccion=%s
                 WHERE id_cliente=%s
-            """, (nombre, apellido, telefono or None, hash_pw, id_cliente))
+            """, (nombre, apellido, telefono or None, hash_pw, direccion, id_cliente))
         else:
             # id_tipo_documento=1 (DNI) y nro_documento NULL por defecto;
             # el formulario web no pide documento todavía.
@@ -2185,10 +2211,10 @@ def registro_cliente():
             # y un segundo registro con '' violaría la restricción. NULL no choca.
             cursor.execute("""
                 INSERT INTO cliente (nombre, apellido, email, telefono, contrasena,
-                                     id_tipo_documento, nro_documento, activo)
-                VALUES (%s, %s, %s, %s, %s, 1, NULL, FALSE)
+                                     id_tipo_documento, nro_documento, direccion, activo)
+                VALUES (%s, %s, %s, %s, %s, 1, NULL, %s, FALSE)
                 RETURNING id_cliente
-            """, (nombre, apellido, correo, telefono or None, hash_pw))
+            """, (nombre, apellido, correo, telefono or None, hash_pw, direccion))
             id_cliente = cursor.fetchone()['id_cliente']
 
         # Invalidar códigos anteriores de este cliente y guardar el nuevo (solo el hash)
@@ -2229,8 +2255,13 @@ def registro_cliente():
                                aviso_smtp=True)
     if resultado == 'smtp_auth':
         return render_template('login_cliente.html',
-                               error='Error de autenticación con el correo. Contacta al administrador.',
-                               registro_activo=True)
+                               verificar_activo=True,
+                               correo_verificar=correo,
+                               codigo_visible=codigo,
+                               aviso_smtp=True,
+                               aviso_smtp_motivo=(
+                                   'Credenciales SMTP inválidas (revisa SMTP_USER/SMTP_PASS '
+                                   'usando una contraseña de aplicación de Gmail).'))
     if resultado:
         return render_template('login_cliente.html',
                                error='No se pudo enviar el correo de verificación. Intenta de nuevo.',
@@ -2395,7 +2426,11 @@ def recuperar_contrasena():
                                codigo_visible=codigo, aviso_smtp=True)
     if resultado == 'smtp_auth':
         return render_template('recuperar_contrasena.html',
-                               error='Error de autenticación con el correo. Contacta al administrador.')
+                               verificar_activo=True, correo_verificar=correo,
+                               codigo_visible=codigo, aviso_smtp=True,
+                               aviso_smtp_motivo=(
+                                   'Credenciales SMTP inválidas (revisa SMTP_USER/SMTP_PASS '
+                                   'usando una contraseña de aplicación de Gmail).'))
     if resultado:
         return render_template('recuperar_contrasena.html',
                                error='No se pudo enviar el correo. Intenta de nuevo.')
@@ -2516,8 +2551,13 @@ def mis_pedidos():
     conn   = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
     pedidos_lista = []
-    PASOS = ['pendiente', 'procesando', 'enviado', 'entregado']
+    fases_orden = []
     try:
+        # Fases válidas leídas de la BD (misma fuente que el panel admin)
+        cursor.execute("SELECT nombre FROM estado_venta WHERE activo = TRUE ORDER BY orden")
+        fases_orden = [r['nombre'] for r in cursor.fetchall()]
+        fases_orden = [f for f in fases_orden if f != 'cancelado']
+        PASOS = fases_orden
         cursor.execute("""
             SELECT v.id_venta,
                    v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima' AS fecha,
@@ -2549,7 +2589,9 @@ def mis_pedidos():
         app.logger.exception("Error mis_pedidos: %s", e)
     finally:
         conn.close()
-    return render_template('mis_pedidos.html', pedidos=pedidos_lista)
+    if not fases_orden:
+        fases_orden = ['pendiente', 'procesando', 'enviado', 'entregado']
+    return render_template('mis_pedidos.html', pedidos=pedidos_lista, fases_orden=fases_orden)
 
 
 @app.route('/pedido_aceptado')
@@ -2583,14 +2625,22 @@ def pedido_aceptado():
 @login_required
 @escritura_required
 def pedido_cambiar_estado(id):
-    """Vendedor/Admin cambia el estado (fase) de un pedido."""
+    """Vendedor/Admin cambia el estado (fase) de un pedido.
+    Responde JSON si la petición es AJAX (X-Requested-With), o redirige
+    si llega desde un formulario clásico. (Integrado desde origin/Lesly.)
+    """
     conn_v   = get_connection_tienda()
     cursor_v = conn_v.cursor(dictionary=True)
     cursor_v.execute("SELECT nombre FROM estado_venta WHERE activo = TRUE ORDER BY orden")
     estados_validos = tuple(r['nombre'] for r in cursor_v.fetchall())
     conn_v.close()
-    nuevo_estado = request.form.get('estado', 'pendiente')
+
+    nuevo_estado = (request.form.get('estado') or '').strip()
+    is_ajax = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
+
     if nuevo_estado not in estados_validos:
+        if is_ajax:
+            return {'ok': False, 'error': f'Estado "{nuevo_estado}" no es válido.'}, 400
         flash('Estado no válido.', 'danger')
         return redirect(url_for('pedido_detalle', id=id))
     conn   = get_connection_tienda()
@@ -2602,10 +2652,16 @@ def pedido_cambiar_estado(id):
             WHERE id_venta = %s
         """, (nuevo_estado, id))
         conn.commit()
+        if is_ajax:
+            return {'ok': True, 'estado': nuevo_estado,
+                    'mensaje': f'Estado actualizado a "{nuevo_estado}".'}
         flash(f'Estado actualizado a "{nuevo_estado}".', 'success')
-    except Exception as e:
+    except Exception:
         conn.rollback()
-        flash(f'Error al actualizar estado: {e}', 'danger')
+        app.logger.exception("Error al actualizar estado del pedido %s", id)
+        if is_ajax:
+            return {'ok': False, 'error': 'No se pudo actualizar el estado. Intenta de nuevo.'}, 500
+        flash('Error al actualizar el estado. Intenta de nuevo.', 'danger')
     finally:
         conn.close()
     # Volver a la lista si el cambio vino desde /pedidos, sino al detalle
@@ -2756,9 +2812,10 @@ def carrito_confirmar_v2():
         num_comp = _siguiente_numero_comprobante(cursor, tipo_comp_db)
         try:
             cursor.execute("""
-                INSERT INTO comprobante (id_venta, id_tipo_comprobante, numero, ruc)
-                VALUES (%s, (SELECT id_tipo_comprobante FROM tipo_comprobante WHERE nombre = %s), %s, %s)
-            """, (id_venta, tipo_comp_db, num_comp, ruc))
+                INSERT INTO comprobante (id_venta, id_tipo_comprobante, numero, ruc, serie)
+                VALUES (%s, (SELECT id_tipo_comprobante FROM tipo_comprobante WHERE nombre = %s), %s, %s, %s)
+            """, (id_venta, tipo_comp_db, num_comp, ruc,
+                  'F001' if tipo_comp_db == 'factura' else 'B001'))
         except Exception:
             conn.rollback()
             app.logger.exception("Error al insertar comprobante del pedido id_venta=%s", id_venta)

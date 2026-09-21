@@ -122,7 +122,13 @@
             {% if aviso_smtp %}
                 <div class="alert-info" style="background:#fffbea;border-color:#f59e0b;color:#78350f;margin-bottom:16px">
                     <i class="fa fa-triangle-exclamation me-2"></i>
-                    <strong>Modo desarrollo:</strong> El correo SMTP no está configurado.<br>
+                    <strong>No se pudo enviar el correo:</strong>
+                    {% if aviso_smtp_motivo %}
+                        {{ aviso_smtp_motivo }}
+                    {% else %}
+                        El correo SMTP no está configurado.
+                    {% endif %}
+                    <br>
                     Tu código de verificación es: <strong style="font-size:1.4rem;letter-spacing:6px;color:#1d4ed8">{{ codigo_visible }}</strong>
                 </div>
             {% endif %}
@@ -138,6 +144,7 @@
                 </p>
             </div>
             <form method="POST" action="/verificar_registro">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <div class="mb-4">
                     <label class="form-label text-center d-block">Ingresa el código</label>
                     <input type="text" name="codigo" class="code-input"
@@ -178,6 +185,7 @@
                 <div class="alert-success"><i class="fa fa-check-circle me-2"></i>{{ success }}</div>
             {% endif %}
             <form method="POST" action="/login_cliente">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <div class="mb-3">
                     <label class="form-label">Correo electrónico</label>
                     <div class="input-group-custom">
@@ -215,10 +223,6 @@
                 </a>
             </div>
             {% endif %}
-            <div class="admin-badge mt-3">
-                <i class="fa fa-shield-halved me-2"></i>
-                ¿Eres administradora? <a href="/login">Inicia sesión aquí</a>
-            </div>
         </div>
 
         <!-- Tab Registro -->
@@ -227,6 +231,7 @@
                 <div class="alert-error"><i class="fa fa-exclamation-circle me-2"></i>{{ error }}</div>
             {% endif %}
             <form method="POST" action="/registro_cliente">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <div class="form-row-2 mb-3">
                     <div>
                         <label class="form-label">Nombre *</label>
@@ -261,6 +266,18 @@
                     </div>
                 </div>
                 <div class="mb-3">
+                    <label class="form-label">Dirección *</label>
+                    <div class="input-group-custom">
+                        <i class="fa fa-location-dot icon-left"></i>
+                        <input type="text" name="direccion" class="form-control"
+                               placeholder="Av. Ejemplo 123, Lima" minlength="5"
+                               required style="padding-left:38px">
+                    </div>
+                    <div style="font-size:0.75rem;color:#888;margin-top:4px">
+                        <i class="fa fa-info-circle me-1"></i>Obligatoria (mínimo 5 caracteres)
+                    </div>
+                </div>
+                <div class="mb-3">
                     <label class="form-label">Contraseña *</label>
                     <div class="input-group-custom" style="position:relative">
                         <i class="fa fa-lock icon-left"></i>
@@ -286,10 +303,6 @@
                     <i class="fa fa-paper-plane me-2"></i>Enviar código de verificación
                 </button>
             </form>
-            <div class="admin-badge mt-3">
-                <i class="fa fa-shield-halved me-2"></i>
-                ¿Eres administradora? <a href="/login">Inicia sesión aquí</a>
-            </div>
         </div>
         {% endif %}
     </div>

@@ -420,6 +420,7 @@ function actualizarContador() {
 
 // Flag global: está logueado como cliente?
 const estaLogueado = {{ 'true' if session.usuario_id and session.rol == 'cliente' else 'false' }};
+const CSRF_TOKEN = {{ csrf_token|tojson }};
 
 function agregarAlCarrito(id, nombre, precio, btn) {
     let carrito = getCarrito();
@@ -447,7 +448,7 @@ function agregarAlCarrito(id, nombre, precio, btn) {
 function validarConServidor(id) {
     fetch('/carrito/agregar', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-CSRFToken': CSRF_TOKEN },
         body: JSON.stringify({ id_producto: id, cantidad: 1 })
     })
     .then(r => r.json())
