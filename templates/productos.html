@@ -7,7 +7,8 @@
         <h2><i class="fa fa-box me-2"></i>GESTIÓN DE PRODUCTOS</h2>
         <p>Administra los productos registrados. Usa búsquedas, filtros por categoría/marca y exporta listados. Total: {{ productos|length }}</p>
     </div>
-    <div class="d-flex gap-2">
+    <div class="d-flex gap-2 flex-wrap">
+        {% include 'components/boton_nueva_venta.html' %}
         {% if session.rol in ['administrador','vendedor'] %}
         <a href="/productos/nuevo" class="btn btn-naranja">
             <i class="fa fa-plus me-1"></i> Nuevo Producto

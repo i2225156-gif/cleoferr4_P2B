@@ -7,10 +7,8 @@
         <h2><i class="fa fa-receipt me-2"></i>PEDIDOS</h2>
         <p>Listado de pedidos y su estado. Usa filtros para buscar por fecha, estado o cliente.</p>
     </div>
-    <div class="d-flex gap-2">
-        <a href="/ventas/nueva" class="btn btn-naranja">
-            <i class="fa fa-plus me-1"></i> Nueva Venta
-        </a>
+    <div class="d-flex gap-2 flex-wrap">
+        {% include 'components/boton_nueva_venta.html' %}
         <a href="/reportes/pedidos/exportar" class="btn btn-outline-secondary">
             <i class="fa fa-file-export me-1"></i> Exportar (Excel)
         </a>

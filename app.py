@@ -1537,15 +1537,29 @@ def venta_nueva_guardar():
                 tipo_comp_db = 'boleta'
                 doc_cliente = None
             num_comp = _siguiente_numero_comprobante(cursor, tipo_comp_db)
+            # Totales calculados a partir del detalle (precios con IGV 18% incluido)
             cursor.execute("""
-                INSERT INTO comprobante (id_venta, id_tipo_comprobante, numero, ruc, serie)
-                VALUES (%s, (SELECT id_tipo_comprobante FROM tipo_comprobante WHERE nombre = %s), %s, %s, %s)
+                SELECT COALESCE(SUM(cantidad * precio_unitario), 0) AS total
+                FROM detalle_venta WHERE id_venta = %s
+            """, (id_venta,))
+            _total        = round(float(cursor.fetchone()['total'] or 0), 2)
+            _subtotal     = round(_total / 1.18, 2)
+            _igv          = round(_total - _subtotal, 2)
+            cursor.execute("""
+                INSERT INTO comprobante
+                    (id_venta, id_tipo_comprobante, numero, ruc, serie, subtotal, igv, total)
+                VALUES (%s, (SELECT id_tipo_comprobante FROM tipo_comprobante WHERE nombre = %s),
+                        %s, %s, %s, %s, %s, %s)
             """, (id_venta, tipo_comp_db, num_comp,
                   doc_cliente if tipo_comp_db == 'factura' else None,
-                  'F001' if tipo_comp_db == 'factura' else 'B001'))
+                  'F001' if tipo_comp_db == 'factura' else 'B001',
+                  _subtotal, _igv, _total))
 
         conn.commit()
         flash(f'Venta #{id_venta} registrada correctamente.', 'success')
+        # Solo ventas LOCALES: tras cobrar, mostrar el comprobante (boleta/factura).
+        if tipo_venta == 'local':
+            return redirect(url_for('comprobante_venta', id_venta=id_venta))
         return redirect(url_for('pedidos'))
 
     except ValueError as e:
@@ -1959,6 +1973,154 @@ def pedido_detalle(id):
                            idx_actual=idx_actual, fases_orden=PASOS,
                            estados=PASOS)
 
+@app.route('/ventas/<int:id_venta>/comprobante')
+@login_required
+@escritura_required   # mismo control que ventas/caja: solo administrador y vendedor
+def comprobante_venta(id_venta):
+    """Muestra el comprobante (boleta/factura SIMULADA) de una venta.
+
+    Si la venta aún no tiene registro en la tabla comprobante, se crea aquí
+    mismo (numeración correlativa + subtotal/igv/total) dentro de una
+    transacción; si ya existía solo se lee. Nunca falla por datos parciales:
+    cliente sin DNI, vendedor nulo, etc. se muestran como campos vacíos.
+    """
+    formato = 'ticket' if request.args.get('formato') == 'ticket' else 'a4'
+
+    conn   = get_connection_tienda()
+    cursor = conn.cursor(dictionary=True)
+    venta = comprobante = None
+    items = []
+    metodo_pago = None
+    try:
+        cursor.execute("""
+            SELECT v.*, tv.nombre AS tipo_venta, ev.nombre AS estado_venta
+            FROM venta v
+            LEFT JOIN tipo_venta tv   ON v.id_tipo_venta   = tv.id_tipo_venta
+            LEFT JOIN estado_venta ev ON v.id_estado_venta  = ev.id_estado_venta
+            WHERE v.id_venta = %s
+        """, (id_venta,))
+        venta = cursor.fetchone()
+        if not venta:
+            abort(404)
+
+        cursor.execute("""
+            SELECT d.id_detalle, d.cantidad, d.precio_unitario,
+                   COALESCE(d.nombre_producto, p.nombre) AS descripcion,
+                   ROUND(d.cantidad * d.precio_unitario, 2) AS importe
+            FROM detalle_venta d
+            LEFT JOIN producto p ON d.id_producto = p.id_producto
+            WHERE d.id_venta = %s
+            ORDER BY d.id_detalle
+        """, (id_venta,))
+        items = cursor.fetchall()
+
+        # Método de pago registrado (efectivo / tarjeta / yape_plin)
+        cursor.execute("""
+            SELECT tp.nombre FROM pago p
+            JOIN tipo_pago tp ON p.id_tipo_pago = tp.id_tipo_pago
+            WHERE p.id_venta = %s LIMIT 1
+        """, (id_venta,))
+        fila_pago = cursor.fetchone()
+        metodo_pago = fila_pago['nombre'] if fila_pago else None
+
+        # Comprobante: leer o crear si falta
+        cursor.execute("""
+            SELECT c.*, tc.nombre AS tipo
+            FROM comprobante c
+            LEFT JOIN tipo_comprobante tc ON c.id_tipo_comprobante = tc.id_tipo_comprobante
+            WHERE c.id_venta = %s LIMIT 1
+        """, (id_venta,))
+        comprobante = cursor.fetchone()
+
+        # Totales desde el detalle (precios con IGV 18% incluido)
+        total_calc    = round(sum(float(i['importe'] or 0) for i in items), 2)
+        subtotal_calc = round(total_calc / 1.18, 2)
+        igv_calc      = round(total_calc - subtotal_calc, 2)
+
+        if not comprobante:
+            # Crear comprobante en el momento (ventas antiguas sin registro).
+            # Por defecto se emite boleta; la factura solo la genera el flujo
+            # de cobro, que recibe el RUC del cliente.
+            tipo_comp_db = 'boleta'
+            num_comp = _siguiente_numero_comprobante(cursor, tipo_comp_db)
+            cursor.execute("""
+                INSERT INTO comprobante
+                    (id_venta, id_tipo_comprobante, numero, ruc, serie, subtotal, igv, total)
+                VALUES (%s, (SELECT id_tipo_comprobante FROM tipo_comprobante WHERE nombre = %s),
+                        %s, NULL, %s, %s, %s, %s)
+                RETURNING *
+            """, (id_venta, tipo_comp_db, num_comp,
+                  'B001', subtotal_calc, igv_calc, total_calc))
+            comprobante = cursor.fetchone()
+            comprobante['tipo'] = tipo_comp_db
+            conn.commit()
+        elif comprobante.get('total') is None:
+            # Registro viejo sin totales: completarlos con lo calculado.
+            cursor.execute("""
+                UPDATE comprobante SET subtotal = %s, igv = %s, total = %s
+                WHERE id_comprobante = %s
+            """, (subtotal_calc, igv_calc, total_calc, comprobante['id_comprobante']))
+            conn.commit()
+            comprobante.update(subtotal=subtotal_calc, igv=igv_calc, total=total_calc)
+    except Exception:
+        conn.rollback()
+        app.logger.exception("Error en comprobante_venta %s", id_venta)
+        flash('No se pudo cargar el comprobante de la venta.', 'danger')
+        return redirect(url_for('pedido_detalle', id=id_venta))
+    finally:
+        conn.close()
+
+    # Datos en la BD Auth: cliente (DNI/nombre) y vendedor (solo lectura).
+    cliente_doc = cliente_nombre = vendedor = None
+    try:
+        conn_a   = get_connection_auth()
+        cursor_a = conn_a.cursor(dictionary=True)
+        if venta.get('id_cliente'):
+            cursor_a.execute(
+                "SELECT nombre, apellido, nro_documento FROM cliente WHERE id_cliente = %s",
+                (venta['id_cliente'],))
+            cli = cursor_a.fetchone() or {}
+            cliente_doc    = (cli.get('nro_documento') or '').strip() or None
+            cliente_nombre = (f"{cli.get('nombre') or ''} {cli.get('apellido') or ''}").strip() or None
+        if venta.get('id_usuario_vendedor'):
+            cursor_a.execute(
+                "SELECT nombres FROM usuario WHERE id_usuario = %s",
+                (venta['id_usuario_vendedor'],))
+            usr = cursor_a.fetchone()
+            vendedor = usr['nombres'] if usr else None
+        conn_a.close()
+    except Exception:
+        app.logger.exception("Error consultando datos de Auth para el comprobante %s", id_venta)
+
+    tipo = (comprobante.get('tipo') or 'boleta').lower()
+    # serie-numero legible: p. ej. serie 'B001' + numero 'B000046' -> 'B001-000046'
+    serie  = comprobante.get('serie') or ('F001' if tipo == 'factura' else 'B001')
+    numero = comprobante.get('numero') or ''
+    dig    = numero[-6:] if numero else '000000'
+    serie_numero = f'{serie}-{dig}'
+
+    # RUC del cliente: en facturas viene en comprobante.ruc; en boletas se
+    # muestra el DNI del cliente si existe (si no, "CLIENTES VARIOS").
+    total       = round(float(comprobante.get('total') or 0), 2)
+    subtotal    = round(float(comprobante.get('subtotal') or 0), 2)
+    igv         = round(float(comprobante.get('igv') or 0), 2)
+    total_letras = numero_a_letras(total)
+
+    # Contenido del QR: resumen del comprobante (formato estilo SUNAT simulado)
+    qr_texto = ('20605977074|{}|{}|{}|{:.2f}|{:.2f}|{}'
+                .format('03' if tipo == 'boleta' else '01', serie, dig,
+                        igv, total, comprobante.get('fecha_emision') or ''))
+    qr_data = _qr_data_uri(qr_texto)
+
+    return render_template('comprobante/comprobante_venta.html',
+                           venta=venta, comprobante=comprobante, items=items,
+                           cliente_doc=cliente_doc, cliente_nombre=cliente_nombre,
+                           vendedor=vendedor, metodo_pago=metodo_pago,
+                           subtotal=subtotal, igv=igv, total=total,
+                           total_letras=total_letras, serie_numero=serie_numero,
+                           qr_data=qr_data, formato=formato)
+
+
 @app.route('/reportes')
 @login_required
 @escritura_required
@@ -2277,7 +2439,6 @@ def registro_cliente():
             # sin contrasena: se reutiliza la fila y se vuelve a verificar.
             id_cliente = existente['id_cliente']
             cursor.execute("""
-<<<<<<< HEAD
                 UPDATE cliente SET nombre=%s, apellido=%s, telefono=%s, contrasena=%s, direccion=%s
                 WHERE id_cliente=%s
             """, (nombre, apellido, telefono or None, hash_pw, direccion, id_cliente))
@@ -2286,16 +2447,6 @@ def registro_cliente():
             # el formulario web no pide documento todavía.
             # OJO: no usar '' — la BD tiene UNIQUE (id_tipo_documento, nro_documento)
             # y un segundo registro con '' violaría la restricción. NULL no choca.
-=======
-                UPDATE cliente
-                   SET nombre = %s, apellido = %s, telefono = %s,
-                       contrasena = %s, email = %s, activo = FALSE
-                 WHERE id_cliente = %s
-            """, (nombre, apellido or None, telefono or None, hash_pw, correo, id_cliente))
-        else:
-            # id_tipo_documento=1 (DNI) y nro_documento vacio por defecto:
-            # el formulario web aun no pide documento.
->>>>>>> 4151b81474e7cc841a0f62525eb0251ba7640e79
             cursor.execute("""
                 INSERT INTO cliente (nombre, apellido, email, telefono, contrasena,
                                      id_tipo_documento, nro_documento, direccion, activo)
@@ -2316,11 +2467,7 @@ def registro_cliente():
         conn.commit()
     except Exception as e:
         conn.rollback()
-<<<<<<< HEAD
         app.logger.exception("Error en registro_cliente")
-=======
-        app.logger.exception(f"Error en registro_cliente ({correo}): {e}")
->>>>>>> 4151b81474e7cc841a0f62525eb0251ba7640e79
         return render_template('login_cliente.html',
                                error='No se pudo iniciar el registro. Intenta de nuevo.',
                                registro_activo=True)
@@ -2344,7 +2491,6 @@ def registro_cliente():
                                registro_activo=True)
     if resultado == 'smtp_auth':
         return render_template('login_cliente.html',
-<<<<<<< HEAD
                                verificar_activo=True,
                                correo_verificar=correo,
                                codigo_visible=codigo,
@@ -2352,16 +2498,11 @@ def registro_cliente():
                                aviso_smtp_motivo=(
                                    'Credenciales SMTP inválidas (revisa SMTP_USER/SMTP_PASS '
                                    'usando una contraseña de aplicación de Gmail).'))
-=======
-                               error=('Error de autenticacion del correo del sistema. '
-                                      'Contacta al administrador.'),
-                               registro_activo=True)
     if resultado == 'smtp_conexion':
         return render_template('login_cliente.html',
                                error=('No se pudo conectar con el servidor de correo. '
                                       'Revisa tu conexion e intenta de nuevo.'),
                                registro_activo=True)
->>>>>>> 4151b81474e7cc841a0f62525eb0251ba7640e79
     if resultado:
         return render_template('login_cliente.html',
                                error='No se pudo enviar el correo de verificacion. Intenta de nuevo.',
@@ -2546,18 +2687,14 @@ def recuperar_contrasena():
                                       'Avisa al administrador (falta SMTP_USER/SMTP_PASS).'))
     if resultado == 'smtp_auth':
         return render_template('recuperar_contrasena.html',
-<<<<<<< HEAD
                                verificar_activo=True, correo_verificar=correo,
                                codigo_visible=codigo, aviso_smtp=True,
                                aviso_smtp_motivo=(
                                    'Credenciales SMTP inválidas (revisa SMTP_USER/SMTP_PASS '
                                    'usando una contraseña de aplicación de Gmail).'))
-=======
-                               error='Error de autenticación con el correo. Contacta al administrador.')
     if resultado == 'smtp_conexion':
         return render_template('recuperar_contrasena.html',
                                error='No se pudo conectar con el servidor de correo. Intenta de nuevo.')
->>>>>>> 4151b81474e7cc841a0f62525eb0251ba7640e79
     if resultado:
         return render_template('recuperar_contrasena.html',
                                error='No se pudo enviar el correo. Intenta de nuevo.')
@@ -2796,6 +2933,83 @@ def pedido_cambiar_estado(id):
     if '/pedidos?' in ref or ref.rstrip('/').endswith('/pedidos'):
         return redirect(url_for('pedidos'))
     return redirect(url_for('pedido_detalle', id=id))
+
+
+# ── Helpers del comprobante de venta (simulación boleta/factura) ─────────────
+
+_UNIDADES = ['', 'UNO', 'DOS', 'TRES', 'CUATRO', 'CINCO', 'SEIS', 'SIETE',
+             'OCHO', 'NUEVE', 'DIEZ', 'ONCE', 'DOCE', 'TRECE', 'CATORCE',
+             'QUINCE', 'DIECISÉIS', 'DIECISIETE', 'DIECIOCHO', 'DIECINUEVE', 'VEINTE']
+_DECENAS  = ['', '', 'VEINTI', 'TREINTA', 'CUARENTA', 'CINCUENTA', 'SESENTA',
+             'SETENTA', 'OCHENTA', 'NOVENTA']
+_CENTENAS = ['', 'CIENTO', 'DOSCIENTOS', 'TRESCIENTOS', 'CUATROCIENTOS',
+             'QUINIENTOS', 'SEISCIENTOS', 'SETECIENTOS', 'OCHOCIENTOS', 'NOVECIENTOS']
+
+
+def _tres_digitos_a_letras(n):
+    """Convierte un número 0-999 a letras en español."""
+    if n == 0:
+        return ''
+    if n == 100:
+        return 'CIEN'
+    c, resto = divmod(n, 100)
+    partes = [_CENTENAS[c]] if c else []
+    if resto:
+        if resto <= 20:
+            partes.append(_UNIDADES[resto])
+        else:
+            d, u = divmod(resto, 10)
+            if d == 2 and u:
+                partes.append('VEINTI' + _UNIDADES[u])
+            else:
+                partes.append(_DECENAS[d] + (' Y ' + _UNIDADES[u] if u else ''))
+    return ' '.join(p for p in partes if p)
+
+
+def numero_a_letras(monto):
+    """Devuelve el monto en letras estilo peruano:
+    189.90 -> 'CIENTO OCHENTA Y NUEVE CON 90/100 SOLES'."""
+    try:
+        monto = float(monto or 0)
+    except (TypeError, ValueError):
+        monto = 0.0
+    entero  = int(monto)
+    decimos = int(round((monto - entero) * 100))
+    if decimos == 100:          # redondeo borde (p. ej. 0.999)
+        entero, decimos = entero + 1, 0
+    if entero == 0:
+        letras = 'CERO'
+    else:
+        grupos = []
+        millones, resto = divmod(entero, 1000000)
+        miles, unidades = divmod(resto, 1000)
+        if millones:
+            txt = _tres_digitos_a_letras(millones)
+            grupos.append('UN MILLÓN' if millones == 1 else f'{txt} MILLONES')
+        if miles:
+            txt = _tres_digitos_a_letras(miles)
+            grupos.append('MIL' if miles == 1 else f'{txt} MIL')
+        if unidades:
+            grupos.append(_tres_digitos_a_letras(unidades))
+        letras = ' '.join(grupos)
+    return f'{letras} CON {decimos:02d}/100 SOLES'
+
+
+def _qr_data_uri(texto):
+    """Genera un QR PNG (data URI base64) con el texto dado.
+    Devuelve None si la librería qrcode no está disponible (la plantilla
+    muestra un placeholder en ese caso)."""
+    try:
+        import io, base64, qrcode
+        # Factoría SVG: no requiere Pillow y se imprime nítida a cualquier tamaño.
+        from qrcode.image.svg import SvgImage
+        img = qrcode.make(texto, image_factory=SvgImage, box_size=6, border=1)
+        buf = io.BytesIO()
+        img.save(buf)
+        return 'data:image/svg+xml;base64,' + base64.b64encode(buf.getvalue()).decode()
+    except Exception:
+        app.logger.exception("No se pudo generar el QR del comprobante")
+        return None
 
 
 def _siguiente_numero_comprobante(cursor, tipo_comp):

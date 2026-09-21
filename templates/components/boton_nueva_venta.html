@@ -1,0 +1,11 @@
+{# Botón "Nueva Venta" reutilizable.
+   Uso: {% include 'components/boton_nueva_venta.html' %} dentro de la barra de
+   acciones del encabezado (junto a los demás botones del panel).
+   Solo visible para administrador/vendedor con sesión activa.
+   Nota: las ventas locales requieren caja abierta; si no la hay, el backend
+   muestra el aviso "Abre caja primero en /caja" (no se oculta el botón). #}
+{% if session.usuario_id and session.rol in ['administrador', 'vendedor'] %}
+<a href="/ventas/nueva" class="btn btn-naranja">
+    <i class="fa fa-plus me-1"></i><span class="d-none d-sm-inline">Nueva Venta</span>
+</a>
+{% endif %}
