@@ -1,11 +1,13 @@
 import os
 import sys
 import uuid
+import secrets
+import hmac
 # AÑADIR después de: import uuid
 from urllib.parse import quote
 # Intento seguro de importar dependencias externas; si faltan, mostrar instrucciones claras y salir.
 try:
-    from flask import Flask, render_template, request, redirect, url_for, session, flash
+    from flask import Flask, render_template, request, redirect, url_for, session, flash, abort
     from flask_bcrypt import Bcrypt
     from functools import wraps
     from werkzeug.utils import secure_filename   # ← NUEVO
@@ -136,7 +138,53 @@ class Producto(db.Model):
         return f"<Producto {self.nombre}>"
 
 
-# ── Decorators ──────────────────────────────────────────────
+# ── Decorators y utilidades de sesión ───────────────────────
+# ── CSRF focalizado ─────────────────────────────────────────
+# Sin depender de Flask-WTF: token por sesión, validado SOLO en los endpoints
+# de mayor riesgo (auth, OTP, cambio de clave, carrito, POS).
+# (Integrado desde origin/Lesly; se quitaron de la lista las rutas muertas
+#  procesar_pago y las que no existen en esta rama.)
+_CSRF_PROTEGIDAS = {
+    'login', 'login_cliente', 'registro_cliente', 'verificar_registro',
+    'recuperar_contrasena', 'restablecer_contrasena', 'cambiar_clave',
+    'carrito_confirmar_v2', 'carrito_agregar',
+    'registrar_pos',
+}
+
+
+def _obtener_csrf_token():
+    token = session.get('_csrf_token')
+    if not token:
+        token = secrets.token_hex(32)
+        session['_csrf_token'] = token
+    return token
+
+
+@app.context_processor
+def _ctx_csrf_token():
+    return {'csrf_token': _obtener_csrf_token()}
+
+
+@app.before_request
+def _validar_csrf():
+    if request.method not in ('POST', 'PUT', 'PATCH', 'DELETE'):
+        return None
+    if request.endpoint not in _CSRF_PROTEGIDAS:
+        return None
+    procedente = request.form.get('csrf_token') \
+        or request.headers.get('X-CSRFToken') \
+        or (request.get_json(silent=True) or {}).get('csrf_token')
+    if procedente and hmac.compare_digest(str(procedente), session.get('_csrf_token', '')):
+        return None
+    return abort(400)
+
+
+@app.context_processor
+def _ctx_recuperacion_origen():
+    """Determina desde qué login se llegó a recuperar_contrasena (admin | cliente)."""
+    return {'recuperar_origen': request.values.get('origen', 'cliente')}
+
+
 # Rutas de cliente (públicas/catálogo) que deben redirigir a /login_cliente,
 # no al login administrativo
 _RUTAS_CLIENTE = ('/carrito', '/mis_pedidos')
@@ -265,8 +313,9 @@ def login_cliente():
 @app.route('/logout')
 @login_required
 def logout():
+    es_cliente = session.get('rol') == 'cliente'
     session.clear()
-    return redirect(url_for('login'))
+    return redirect(url_for('login_cliente') if es_cliente else url_for('login'))
 
 
 
@@ -902,6 +951,97 @@ def eliminar_cliente(id):
     return redirect(url_for('clientes'))
 
 
+# ── Registro rápido de cliente desde el Punto de Venta (por DNI/RUC) ──────
+# Boleta  → DNI (8 dígitos) + nombre (autocompletado vía RENIEC en el frontend).
+# Factura → RUC (11 dígitos, inicia en 10 o 20) + razón social + dirección fiscal.
+# id_tipo_documento: 1 = DNI, 6 = RUC (catálogo SUNAT). Los clientes POS se
+# crean con origen='pos' y sin email ni contraseña (no pueden iniciar sesión
+# web, pero sí aparecen en ventas/reportes).
+# (Integrado desde origin/Lesly; consulta RUC/DNI va por /api/consultar_* del
+#  frontend, nunca con token expuesto.)
+@app.route('/clientes/registrar_pos', methods=['POST'])
+@login_required
+@escritura_required
+def registrar_pos():
+    data = request.get_json(silent=True) or {}
+    tipo = (data.get('tipo') or 'boleta').strip().lower()
+    if tipo not in ('boleta', 'factura'):
+        return {'ok': False, 'error': 'Tipo de comprobante inválido.'}, 400
+
+    nombre    = (data.get('nombre') or '').strip()
+    telefono  = (data.get('telefono') or '').strip()
+    apellido  = (data.get('apellido') or '').strip()
+    direccion = (data.get('direccion') or '').strip()
+
+    if tipo == 'boleta':
+        doc = (data.get('dni') or '').strip()
+        if not doc.isdigit() or len(doc) != 8:
+            return {'ok': False, 'error': 'El DNI debe tener exactamente 8 dígitos.'}, 400
+        if len(nombre) < 3:
+            return {'ok': False, 'error': 'El nombre del cliente es obligatorio (mínimo 3 caracteres).'}, 400
+    else:
+        doc = (data.get('ruc') or '').strip()
+        if not doc.isdigit() or len(doc) != 11 or doc[:2] not in ('10', '20'):
+            return {'ok': False, 'error': 'El RUC debe tener 11 dígitos y comenzar con 10 o 20.'}, 400
+        if len(nombre) < 3:
+            return {'ok': False, 'error': 'La razón social es obligatoria (mínimo 3 caracteres).'}, 400
+        if len(direccion) < 5:
+            return {'ok': False, 'error': 'La dirección fiscal es obligatoria para factura (mínimo 5 caracteres).'}, 400
+
+    if telefono and (not telefono.isdigit() or len(telefono) != 9):
+        return {'ok': False, 'error': 'El teléfono debe tener exactamente 9 dígitos.'}, 400
+
+    id_tipo_doc = 1 if tipo == 'boleta' else 6
+    conn   = get_connection_auth()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        # ¿Ya existe un cliente con ese documento? → se reutiliza (no se duplica)
+        cursor.execute("""
+            SELECT id_cliente, nombre, apellido, telefono FROM cliente
+            WHERE id_tipo_documento = %s AND nro_documento = %s
+        """, (id_tipo_doc, doc))
+        existente = cursor.fetchone()
+        if existente:
+            if telefono and not (existente.get('telefono') or '').strip():
+                cursor.execute(
+                    "UPDATE cliente SET telefono = %s WHERE id_cliente = %s",
+                    (telefono, existente['id_cliente']))
+                conn.commit()
+            nombre_existente = f"{existente.get('nombre') or ''} {existente.get('apellido') or ''}".strip()
+            return {'ok': True, 'id_cliente': existente['id_cliente'],
+                    'nombre': nombre_existente, 'ya_existia': True}
+
+        # `apellido` es NOT NULL en la BD. Si no se envió y es boleta (RENIEC:
+        # Nombres ApellidoPaterno ApellidoMaterno), separamos el nombre completo;
+        # como último recurso usamos '' (respeta NOT NULL). En factura, la razón
+        # social se guarda completa en `nombre` y `apellido` queda ''.
+        nombre_db   = nombre
+        apellido_db = apellido
+        if not apellido_db and tipo == 'boleta':
+            partes = nombre.split()
+            if len(partes) >= 2:
+                nombre_db   = partes[0]
+                apellido_db = ' '.join(partes[1:])
+        cursor.execute("""
+            INSERT INTO cliente (nombre, apellido, email, telefono, id_tipo_documento,
+                                 nro_documento, direccion, contrasena, activo, origen)
+            VALUES (%s, %s, NULL, %s, %s, %s, %s, NULL, TRUE, 'pos')
+            RETURNING id_cliente
+        """, (nombre_db, apellido_db, telefono or None, id_tipo_doc, doc,
+              direccion or None))
+        id_cliente = cursor.fetchone()['id_cliente']
+        conn.commit()
+        nombre_mostrar = f"{nombre_db} {apellido_db}".strip()
+        return {'ok': True, 'id_cliente': id_cliente, 'nombre': nombre_mostrar,
+                'ya_existia': False}
+    except Exception:
+        conn.rollback()
+        app.logger.exception("Error al registrar cliente desde el POS")
+        return {'ok': False, 'error': 'No se pudo guardar el cliente. Intenta de nuevo.'}, 500
+    finally:
+        conn.close()
+
+
 # ── Inventario ────────────────────────────────────────────────
 @app.route('/inventario')
 @login_required
@@ -1203,8 +1343,10 @@ def venta_nueva_form():
         conn_a   = get_connection_auth()
         cursor_a = conn_a.cursor(dictionary=True)
         cursor_a.execute("""
-            SELECT id_cliente, CONCAT(nombre, ' ', COALESCE(apellido,'')) AS nombre, telefono
-            FROM cliente WHERE activo = TRUE ORDER BY nombre
+            SELECT c.id_cliente,
+                   CONCAT(c.nombre, ' ', COALESCE(c.apellido,'')) AS nombre,
+                   c.telefono
+            FROM cliente c WHERE COALESCE(c.activo, TRUE) = TRUE ORDER BY c.nombre
         """)
         clientes = cursor_a.fetchall()
         conn_a.close()
@@ -1218,14 +1360,29 @@ def venta_nueva_form():
         productos = cursor.fetchall()
         conn.close()
     except Exception as e:
-        print(f"ERROR en /ventas/nueva GET: {e}")
-    return render_template('venta_form.html', clientes=clientes, productos=productos)
+        app.logger.exception("Error en /ventas/nueva GET: %s", e)
+    # Token de un solo uso: cada formulario solo puede cobrar UNA vez.
+    # Evita dobles cobros por doble clic / re-envío del mismo POST.
+    if not session.get('venta_token'):
+        session['venta_token'] = secrets.token_hex(16)
+    return render_template('venta_form.html', clientes=clientes, productos=productos,
+                           venta_token=session.get('venta_token'))
 
 
 @app.route('/ventas/nueva', methods=['POST'])
 @login_required
 @escritura_required
 def venta_nueva_guardar():
+    # Protección anti doble cobro: el token se genera en cada GET y se consume
+    # con la primera venta. Si se re-envía el mismo formulario (doble clic,
+    # F5/back + submit) el token ya no coincide y se rechaza el duplicado.
+    venta_token = request.form.get('venta_token')
+    if session.get('venta_token') and venta_token != session['venta_token']:
+        flash('Esta venta ya fue registrada: no se permite un doble cobro.', 'warning')
+        return redirect(url_for('pedidos'))
+    # Consumir el ticket: esta página de cobro no puede volver a procesarse.
+    session['venta_token'] = secrets.token_hex(16)
+
     id_cliente   = request.form.get('id_cliente') or None
     tipo_venta   = request.form.get('tipo_venta', 'local')
     metodo_pago  = request.form.get('metodo_pago', 'efectivo')
@@ -1268,11 +1425,22 @@ def venta_nueva_guardar():
 
         # Insertar cada ítem, descontar stock y registrar el movimiento de salida
         for id_prod, cant in zip(ids_producto, cantidades):
-            cant = int(cant) if cant else 1
-            cursor.execute("SELECT precio, stock FROM producto WHERE id_producto = %s", (id_prod,))
+            try:
+                cant = int(cant) if cant else 1
+            except (TypeError, ValueError):
+                cant = 1
+            if cant <= 0:
+                raise ValueError("Las cantidades deben ser mayores a cero.")
+            cursor.execute("SELECT precio, stock, nombre FROM producto WHERE id_producto = %s", (id_prod,))
             prod = cursor.fetchone()
             if not prod:
                 continue
+            # No permitir vender más stock del disponible (evita stock negativo)
+            if cant > (prod['stock'] or 0):
+                raise ValueError(
+                    f"Stock insuficiente de \"{prod['nombre']}\" "
+                    f"(disponible: {prod['stock']} unidades). Venta no registrada."
+                )
             cursor.execute("""
                 INSERT INTO detalle_venta (id_venta, id_producto, cantidad, precio_unitario)
                 VALUES (%s, %s, %s, %s)
@@ -1305,21 +1473,37 @@ def venta_nueva_guardar():
             """, (caja_activa['id_caja'], f'Venta local #{id_venta}',
                   session.get('usuario_id'), id_venta))
 
-        # Comprobante de la venta local: boleta correlativa (B000001...).
-        # Va en la misma transacción junto con pago, stock y movimientos.
+        # ── Comprobante de la venta local (boleta/factura) ────────────
+        # En la misma transacción junto con pago, caja, stock y movimientos.
+        # Tipo: lo decide el modal POS (comp_tipo); por defecto boleta.
+        # Numeración: correlativa por serie vía helper (B000001 / F000001).
         if tipo_venta == 'local':
-            num_comp = _siguiente_numero_comprobante(cursor, 'boleta')
+            comp_tipo = request.form.get('comp_tipo', 'boleta').strip().lower()
+            tipo_comp_db = 'factura' if comp_tipo == 'factura' else 'boleta'
+            doc_cliente = (request.form.get('comp_doc') or '').strip() or None
+            if tipo_comp_db == 'factura' and (not doc_cliente or len(doc_cliente) != 11):
+                flash('Factura requiere un RUC válido (11 dígitos). Se emitió boleta.', 'warning')
+                tipo_comp_db = 'boleta'
+                doc_cliente = None
+            num_comp = _siguiente_numero_comprobante(cursor, tipo_comp_db)
             cursor.execute("""
-                INSERT INTO comprobante (id_venta, id_tipo_comprobante, numero)
-                VALUES (%s, (SELECT id_tipo_comprobante FROM tipo_comprobante WHERE nombre = 'boleta'), %s)
-            """, (id_venta, num_comp))
+                INSERT INTO comprobante (id_venta, id_tipo_comprobante, numero, ruc)
+                VALUES (%s, (SELECT id_tipo_comprobante FROM tipo_comprobante WHERE nombre = %s), %s, %s)
+            """, (id_venta, tipo_comp_db, num_comp,
+                  doc_cliente if tipo_comp_db == 'factura' else None))
 
         conn.commit()
         flash(f'Venta #{id_venta} registrada correctamente.', 'success')
         return redirect(url_for('pedidos'))
 
-    except Exception as e:
-        print(f"ERROR al guardar venta: {e}")
+    except ValueError as e:
+        # Error de negocio (stock insuficiente, cantidad inválida): mensaje claro.
+        conn.rollback()
+        flash(str(e), 'danger')
+        return redirect(url_for('venta_nueva_form'))
+    except Exception:
+        conn.rollback()
+        app.logger.exception("Error al guardar venta local")
         flash('Error al registrar la venta. Intenta de nuevo.', 'danger')
         return redirect(url_for('venta_nueva_form'))
     finally:
@@ -1335,13 +1519,21 @@ UMBRAL_DIFERENCIA_CAJA = 20.0
 @login_required
 @escritura_required
 def caja():
-    """Panel de caja: estado actual, movimientos del turno e historial de cierres."""
+    """Panel de caja: estado actual, movimientos del turno, resumen por método
+    de pago e historial de cierres.
+
+    REGLA ECONÓMICA DE LA CAJA FÍSICA (integrada desde origin/Lesly):
+      EFECTIVO esperado = fondo inicial + ventas locales pagadas en EFECTIVO − egresos
+    Yape/Plin y Tarjeta son pagos DIGITALES: se muestran aparte como resumen y
+    NO forman parte del dinero físico de la caja (no suben el esperado).
+    """
     conn   = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
     caja_abierta = None
     movimientos  = []
-    efectivo_sistema = 0.0
     historial = []
+    resumen   = {}
+    digitales_por_caja = {}
     uids = set()
     try:
         cursor.execute("SELECT * FROM caja WHERE estado = 'abierta' LIMIT 1")
@@ -1352,11 +1544,6 @@ def caja():
                 WHERE id_caja = %s ORDER BY fecha DESC
             """, (caja_abierta['id_caja'],))
             movimientos = cursor.fetchall()
-            # Solo existen 'ingreso' y 'egreso' (CHECK de la tabla)
-            efectivo_sistema = sum(
-                float(m['monto']) if m['tipo'] == 'ingreso' else -float(m['monto'])
-                for m in movimientos
-            )
             uids.add(caja_abierta['id_usuario_apertura'])
             uids.update(m['id_usuario'] for m in movimientos if m['id_usuario'])
 
@@ -1367,6 +1554,60 @@ def caja():
         for h in historial:
             if h['id_usuario_apertura']: uids.add(h['id_usuario_apertura'])
             if h['id_usuario_cierre']:   uids.add(h['id_usuario_cierre'])
+
+        # ── Resumen económico por caja (ventas LOCALES con pago confirmado) ──
+        caja_ids = ([caja_abierta['id_caja']] if caja_abierta else []) \
+                 + [h['id_caja'] for h in historial]
+        if caja_ids:
+            cursor.execute("""
+                SELECT p.id_caja, tp.nombre AS metodo,
+                       COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS total
+                FROM pago p
+                JOIN venta v       ON v.id_venta = p.id_venta
+                JOIN tipo_venta tv ON v.id_tipo_venta = tv.id_tipo_venta
+                JOIN tipo_pago tp  ON p.id_tipo_pago = tp.id_tipo_pago
+                LEFT JOIN detalle_venta d ON d.id_venta = v.id_venta
+                WHERE tv.nombre = 'local' AND p.estado = 'confirmado'
+                  AND p.id_caja = ANY(%s)
+                GROUP BY p.id_caja, tp.nombre
+            """, (caja_ids,))
+            ventas_por_caja = {}
+            for r in cursor.fetchall():
+                ventas_por_caja.setdefault(r['id_caja'], {})[r['metodo']] = float(r['total'] or 0)
+
+            cursor.execute("""
+                SELECT id_caja, COALESCE(SUM(monto), 0) AS total
+                FROM movimiento_caja
+                WHERE id_caja = ANY(%s) AND tipo = 'egreso'
+                GROUP BY id_caja
+            """, (caja_ids,))
+            egresos_por_caja = {r['id_caja']: float(r['total'] or 0)
+                                for r in cursor.fetchall()}
+
+            for row in ([caja_abierta] if caja_abierta else []) + historial:
+                met    = ventas_por_caja.get(row['id_caja'], {})
+                fondo  = float(row.get('monto_apertura') or 0)
+                ven_ef = met.get('efectivo', 0.0)
+                yape   = met.get('yape_plin', 0.0)
+                tar    = met.get('tarjeta', 0.0)
+                egres  = egresos_por_caja.get(row['id_caja'], 0.0)
+                esperado = fondo + ven_ef - egres
+                digitales_por_caja[row['id_caja']] = {
+                    'yape': yape,
+                    'tarjeta': tar,
+                    'total_digital': yape + tar,
+                    'ventas_efectivo': ven_ef,
+                }
+                if caja_abierta and row['id_caja'] == caja_abierta['id_caja']:
+                    resumen = {
+                        'fondo':           fondo,
+                        'ventas_efectivo': ven_ef,
+                        'yape':            yape,
+                        'tarjeta':         tar,
+                        'total_ventas':    ven_ef + yape + tar,
+                        'egresos':         egres,
+                        'esperado':        esperado,
+                    }
     except Exception as e:
         app.logger.exception("Error en /caja: %s", e)
     finally:
@@ -1388,7 +1629,8 @@ def caja():
     return render_template('caja.html',
                            caja=caja_abierta,
                            movimientos=movimientos,
-                           efectivo_sistema=efectivo_sistema,
+                           resumen=resumen,
+                           digitales=digitales_por_caja,
                            historial=historial,
                            nombres=nombres,
                            umbral=UMBRAL_DIFERENCIA_CAJA)
