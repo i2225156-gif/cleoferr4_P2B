@@ -119,6 +119,7 @@
         {% if verificar_activo %}
         <!-- PANTALLA DE VERIFICACIÓN DE CÓDIGO -->
         <div class="tab-content active" id="tab-verificar">
+<<<<<<< HEAD
             {% if aviso_smtp %}
                 <div class="alert-info" style="background:#fffbea;border-color:#f59e0b;color:#78350f;margin-bottom:16px">
                     <i class="fa fa-triangle-exclamation me-2"></i>
@@ -132,6 +133,8 @@
                     Tu código de verificación es: <strong style="font-size:1.4rem;letter-spacing:6px;color:#1d4ed8">{{ codigo_visible }}</strong>
                 </div>
             {% endif %}
+=======
+>>>>>>> 4151b81474e7cc841a0f62525eb0251ba7640e79
             {% if error %}
                 <div class="alert-error"><i class="fa fa-exclamation-circle me-2"></i>{{ error }}</div>
             {% endif %}
@@ -144,7 +147,11 @@
                 </p>
             </div>
             <form method="POST" action="/verificar_registro">
+<<<<<<< HEAD
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+=======
+                <input type="hidden" name="correo" value="{{ correo_verificar }}">
+>>>>>>> 4151b81474e7cc841a0f62525eb0251ba7640e79
                 <div class="mb-4">
                     <label class="form-label text-center d-block">Ingresa el código</label>
                     <input type="text" name="codigo" class="code-input"
