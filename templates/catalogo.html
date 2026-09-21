@@ -420,6 +420,7 @@ function actualizarContador() {
 
 // Flag global: está logueado como cliente?
 const estaLogueado = {{ 'true' if session.usuario_id and session.rol == 'cliente' else 'false' }};
+const CSRF_TOKEN = {{ csrf_token|tojson }};
 
 function agregarAlCarrito(id, nombre, precio, btn) {
     let carrito = getCarrito();
@@ -438,12 +439,34 @@ function agregarAlCarrito(id, nombre, precio, btn) {
     mostrarToast(nombre + ' agregado al carrito');
 
     if (estaLogueado) {
-        fetch('/carrito/agregar', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id_producto: id, cantidad: 1 })
-        });
+        validarConServidor(id);
     }
+}
+
+// Valida el producto contra la BD y sincroniza nombre/precio oficiales.
+// Si ya no existe o está sin stock, lo retira del carrito y avisa.
+function validarConServidor(id) {
+    fetch('/carrito/agregar', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRFToken': CSRF_TOKEN },
+        body: JSON.stringify({ id_producto: id, cantidad: 1 })
+    })
+    .then(r => r.json())
+    .then(d => {
+        let carrito = getCarrito();
+        const idx = carrito.findIndex(i => i.id === id);
+        if (idx < 0) return;
+        if (!d.ok) {
+            carrito.splice(idx, 1);
+            saveCarrito(carrito);
+            alert(d.error || 'Este producto ya no está disponible.');
+            return;
+        }
+        carrito[idx].nombre = d.nombre;
+        carrito[idx].precio = d.precio;
+        saveCarrito(carrito);
+    })
+    .catch(() => {});
 }
 
 function mostrarToast(msg) {
@@ -587,11 +610,7 @@ function modalAgregarCarrito() {
     document.getElementById('modalProducto').classList.remove('abierto');
     document.body.style.overflow = '';
     if (estaLogueado) {
-        fetch('/carrito/agregar', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id_producto: mpData.id, cantidad: cant })
-        });
+        validarConServidor(mpData.id);
     }
 }
 

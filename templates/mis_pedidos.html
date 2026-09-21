@@ -47,7 +47,9 @@
 }
 .badge-pendiente   { background: #fff3cd; color: #856404; }
 .badge-confirmado  { background: #cfe2ff; color: #084298; }
+.badge-procesando  { background: #fff3cd; color: #664d03; }
 .badge-preparando  { background: #fff3cd; color: #664d03; }
+.badge-enviado     { background: #cfe2ff; color: #084298; }
 .badge-listo       { background: #d1e7dd; color: #0f5132; }
 .badge-entregado   { background: #28a745; color: white; }
 .badge-cancelado   { background: #f8d7da; color: #842029; }
@@ -93,7 +95,7 @@
     <div class="pedido-card-body">
         <!-- Stepper de estado -->
         {% if estado != 'cancelado' %}
-        {% set fases_orden = ['pendiente', 'confirmado', 'preparando', 'listo', 'entregado'] %}
+        {% set fases_orden = fases_orden or ['pendiente', 'confirmado', 'preparando', 'listo', 'entregado'] %}
         <div class="fases-bar mb-3">
             {% for fase in fases_orden %}
             {% set idx_fase = loop.index0 %}
@@ -103,9 +105,12 @@
                         <i class="fa fa-check"></i>
                     {% elif fase == 'pendiente' %}<i class="fa fa-clock"></i>
                     {% elif fase == 'confirmado' %}<i class="fa fa-check-circle"></i>
+                    {% elif fase == 'procesando' %}<i class="fa fa-cog"></i>
                     {% elif fase == 'preparando' %}<i class="fa fa-box"></i>
+                    {% elif fase == 'enviado' %}<i class="fa fa-truck"></i>
                     {% elif fase == 'listo' %}<i class="fa fa-store"></i>
                     {% elif fase == 'entregado' %}<i class="fa fa-handshake"></i>
+                    {% elif fase == 'cancelado' %}<i class="fa fa-ban"></i>
                     {% endif %}
                 </div>
                 <div class="fase-nombre">{{ fase }}</div>

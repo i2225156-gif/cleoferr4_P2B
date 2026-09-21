@@ -28,8 +28,8 @@
             <div class="d-flex align-items-center gap-3">
                 <div class="stat-icon"><i class="fa fa-coins"></i></div>
                 <div>
-                    <div class="stat-label">Efectivo esperado (sistema)</div>
-                    <div class="stat-value">S/ {{ '%.2f'|format(efectivo_sistema) }}</div>
+                    <div class="stat-label">Efectivo esperado</div>
+                    <div class="stat-value">S/ {{ '%.2f'|format(resumen.esperado) }}</div>
                 </div>
             </div>
         </div>
@@ -44,6 +44,83 @@
                         {{ nombres.get(caja.id_usuario_apertura, '—') }}
                     </div>
                 </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row g-4 mb-4">
+    <!-- Resumen del turno -->
+    <div class="col-lg-7">
+        <div class="card-custom h-100">
+            <div class="card-header"><i class="fa fa-chart-pie me-2"></i>Resumen del turno</div>
+            <div class="p-3">
+                <table class="table table-custom mb-3">
+                    <tbody>
+                        <tr>
+                            <td><i class="fa fa-coins me-1"></i>Ventas en efectivo</td>
+                            <td class="text-end fw-bold">S/ {{ '%.2f'|format(resumen.ventas_efectivo) }}</td>
+                        </tr>
+                        <tr>
+                            <td><i class="fa fa-mobile me-1"></i>Yape / Plin</td>
+                            <td class="text-end">S/ {{ '%.2f'|format(resumen.yape) }}</td>
+                        </tr>
+                        <tr>
+                            <td><i class="fa fa-credit-card me-1"></i>Tarjeta</td>
+                            <td class="text-end">S/ {{ '%.2f'|format(resumen.tarjeta) }}</td>
+                        </tr>
+                        <tr>
+                            <td><i class="fa fa-cart-shopping me-1"></i>Total ventas locales</td>
+                            <td class="text-end fw-bold">S/ {{ '%.2f'|format(resumen.total_ventas) }}</td>
+                        </tr>
+                        <tr>
+                            <td><i class="fa fa-right-from-bracket me-1" style="color:#842029"></i>Egresos del turno</td>
+                            <td class="text-end" style="color:#842029">− S/ {{ '%.2f'|format(resumen.egresos) }}</td>
+                        </tr>
+                        <tr class="table-secondary">
+                            <td class="fw-semibold"><i class="fa fa-coins me-1"></i>Efectivo esperado en caja</td>
+                            <td class="text-end fw-bold fs-5">
+                                S/ {{ '%.2f'|format(resumen.fondo) }} + S/ {{ '%.2f'|format(resumen.ventas_efectivo) }} − S/ {{ '%.2f'|format(resumen.egresos) }}
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+                <div class="alert alert-info py-2" style="font-size:0.85rem">
+                    <i class="fa fa-circle-info me-1"></i>
+                    Solo las <strong>ventas en efectivo</strong> y los <strong>egresos</strong> afectan el
+                    efectivo esperado. Yape/Plin y Tarjeta se reportan aparte (dinero digital).
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Registro de egresos -->
+    <div class="col-lg-5">
+        <div class="card-custom h-100">
+            <div class="card-header"><i class="fa fa-right-from-bracket me-2"></i>Registrar egreso</div>
+            <div class="p-3">
+                <p class="text-muted" style="font-size:0.85rem">
+                    Gastos o salidas de efectivo del turno (movilidad, vueltos, compras menores).
+                    Se descuentan automáticamente del efectivo esperado.
+                </p>
+                <form method="POST" action="{{ url_for('caja_egreso') }}">
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold">Concepto</label>
+                        <input type="text" name="concepto" class="form-control"
+                               maxlength="200" placeholder="Ej. Movilidad del delivery" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold">Monto</label>
+                        <div class="input-group">
+                            <span class="input-group-text">S/</span>
+                            <input type="number" name="monto" class="form-control"
+                                   step="0.01" min="0.01" required>
+                        </div>
+                    </div>
+                    <button class="btn btn-danger-outline w-100">
+                        <i class="fa fa-right-from-bracket me-1"></i>Registrar egreso
+                    </button>
+                </form>
             </div>
         </div>
     </div>
@@ -93,7 +170,11 @@
             <div class="p-3">
                 <div class="alert alert-info" style="font-size:0.85rem">
                     <i class="fa fa-circle-info me-1"></i>
-                    El sistema espera <strong>S/ {{ '%.2f'|format(efectivo_sistema) }}</strong> en efectivo.
+                    El sistema espera <strong>S/ {{ '%.2f'|format(resumen.esperado) }}</strong> en efectivo
+                    (fondo S/ {{ '%.2f'|format(resumen.fondo) }} + ventas efectivo
+                    S/ {{ '%.2f'|format(resumen.ventas_efectivo) }} − egresos S/ {{ '%.2f'|format(resumen.egresos) }}).
+                    <br>Yape/Plin <strong>S/ {{ '%.2f'|format(resumen.yape) }}</strong> ·
+                    Tarjeta <strong>S/ {{ '%.2f'|format(resumen.tarjeta) }}</strong> (digital, no se cuenta en el cierre).
                     Diferencias mayores a S/ {{ '%.0f'|format(umbral) }} se marcarán como advertencia.
                 </div>
                 <form method="POST" action="{{ url_for('caja_cerrar') }}"

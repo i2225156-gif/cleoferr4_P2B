@@ -144,7 +144,7 @@
                 <label class="form-label fw-semibold">Email *</label>
                 <input type="email" name="email" class="form-control"
                        value="{{ cliente.email if cliente else '' }}"
-                       required placeholder="correo@ejemplo.com">
+                       {% if not (cliente and not cliente.email) %}required{% endif %} placeholder="correo@ejemplo.com">
             </div>
 
             <!-- ── Teléfono ── -->
@@ -195,8 +195,6 @@
 </div>
 
 <script>
-const TOKEN   = 'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJlbWFpbCI6ImkyNTEzNzAyQGNvbnRpbmVudGFsLmVkdS5wZSJ9.o02LSzKdddnW-h9XO-sf5hFbquw5vroU6ZAoFhbl9mY';
-const BASE    = 'https://dniruc.apisperu.com/api/v1';
 const soloLetras = /^[a-zA-ZáéíóúÁÉÍÓÚñÑüÜ\s]+$/;
 let tipoActual = 'dni';
 
@@ -252,7 +250,7 @@ async function consultarDoc() {
     caja.style.display    = 'none';
 
     try {
-        const url  = `${BASE}/${tipoActual}/${num}?token=${TOKEN}`;
+        const url  = tipoActual === 'dni' ? `/api/consultar_dni/${num}` : `/api/consultar_ruc/${num}`;
         const resp = await fetch(url, { headers: { 'Accept': 'application/json' } });
         const raw  = await resp.text();           // texto crudo primero
         let data;

@@ -1,0 +1,123 @@
+{# Parcial reutilizable: cuerpo del comprobante (solo diseño, sin layout).
+   Variables esperadas: venta, comprobante, items, cliente_doc, cliente_nombre,
+   vendedor, metodo_pago, subtotal, igv, total, total_letras, serie_numero,
+   qr_data, formato ('a4' | 'ticket') #}
+{% set es_factura = (comprobante.tipo or 'boleta')|lower == 'factura' %}
+<div class="comp-doc{% if formato == 'ticket' %} ticket{% endif %}">
+  {# ── Encabezado ── #}
+  <div class="comp-header">
+    <div class="comp-empresa">
+      <div class="comp-empresa-nombre">INVERSIONES CLEOFERR E.I.R.L.</div>
+      <div class="comp-empresa-linea">Ferretería y materiales de construcción</div>
+      <div class="comp-empresa-linea">Huancayo &mdash; Perú</div>
+      <div class="comp-empresa-linea">RUC: <strong>20605977074</strong></div>
+    </div>
+    <div class="comp-titulo-box">
+      <div class="comp-ruc-emp">R.U.C. 20605977074</div>
+      <div class="comp-titulo">
+        {% if es_factura %}FACTURA ELECTRÓNICA{% else %}BOLETA DE VENTA ELECTRÓNICA{% endif %}
+      </div>
+      <div class="comp-serie">{{ serie_numero }}</div>
+    </div>
+  </div>
+
+  {# ── Datos del comprobante y cliente ── #}
+  <table class="comp-datos">
+    <tr>
+      <th>Fecha de emisión</th>
+      <td>{{ comprobante.fecha_emision.strftime('%d/%m/%Y %H:%M') if comprobante.fecha_emision else '-' }}</td>
+    </tr>
+    <tr>
+      <th>Vendedor</th>
+      <td>{{ vendedor or '-' }}</td>
+    </tr>
+    <tr>
+      <th>Tipo de pago</th>
+      <td>
+        {% if metodo_pago == 'yape_plin' %}Yape / Plin
+        {% elif metodo_pago == 'tarjeta' %}Tarjeta
+        {% elif metodo_pago == 'efectivo' %}Efectivo
+        {% else %}{{ metodo_pago or '-' }}{% endif %}
+      </td>
+    </tr>
+    {% if es_factura %}
+    <tr>
+      <th>RUC</th>
+      <td>{{ comprobante.ruc or '-' }}</td>
+    </tr>
+    <tr>
+      <th>Razón social</th>
+      <td>{{ cliente_nombre or '-' }}</td>
+    </tr>
+    {% else %}
+    <tr>
+      <th>DNI</th>
+      <td>{{ cliente_doc or '-' }}</td>
+    </tr>
+    <tr>
+      <th>Cliente</th>
+      <td>{{ cliente_nombre or 'CLIENTES VARIOS' }}</td>
+    </tr>
+    {% endif %}
+    <tr>
+      <th>Estado SUNAT</th>
+      <td>{{ comprobante.estado_sunat or 'no_aplica' }}</td>
+    </tr>
+  </table>
+
+  {# ── Detalle ── #}
+  <table class="comp-items">
+    <thead>
+      <tr>
+        <th class="col-cant">Cant.</th>
+        <th>Descripción</th>
+        <th class="col-num">P. Unit.</th>
+        <th class="col-num">Importe</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for it in items %}
+      <tr>
+        <td class="col-cant">{{ it.cantidad }}</td>
+        <td>{{ it.descripcion or '-' }}</td>
+        <td class="col-num">S/ {{ '%.2f'|format(it.precio_unitario or 0) }}</td>
+        <td class="col-num">S/ {{ '%.2f'|format(it.importe or 0) }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="4" class="text-center">Sin ítems registrados</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  {# ── Totales ── #}
+  <table class="comp-totales">
+    <tr>
+      <th>Op. Gravada</th>
+      <td>S/ {{ '%.2f'|format(subtotal) }}</td>
+    </tr>
+    <tr>
+      <th>I.G.V. (18%)</th>
+      <td>S/ {{ '%.2f'|format(igv) }}</td>
+    </tr>
+    <tr class="comp-total-final">
+      <th>TOTAL</th>
+      <td>S/ {{ '%.2f'|format(total) }}</td>
+    </tr>
+  </table>
+  <div class="comp-letras"><strong>SON:</strong> {{ total_letras }}</div>
+
+  {# ── Pie: QR + leyenda ── #}
+  <div class="comp-footer">
+    <div class="comp-qr">
+      {% if qr_data %}
+        <img src="{{ qr_data }}" alt="QR del comprobante" width="96" height="96">
+      {% else %}
+        <div class="comp-qr-placeholder">QR</div>
+      {% endif %}
+    </div>
+    <div class="comp-leyenda">
+      Representación impresa simulada. Documento sin validez tributaria hasta la
+      integración con SUNAT/OSE.
+    </div>
+  </div>
+</div>

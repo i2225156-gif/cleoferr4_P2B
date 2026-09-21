@@ -1,11 +1,13 @@
 import os
 import sys
 import uuid
+import secrets
+import hmac
 # AÑADIR después de: import uuid
 from urllib.parse import quote
 # Intento seguro de importar dependencias externas; si faltan, mostrar instrucciones claras y salir.
 try:
-    from flask import Flask, render_template, request, redirect, url_for, session, flash
+    from flask import Flask, render_template, request, redirect, url_for, session, flash, abort
     from flask_bcrypt import Bcrypt
     from functools import wraps
     from werkzeug.utils import secure_filename   # ← NUEVO
@@ -177,10 +179,56 @@ class Producto(db.Model):
         return f"<Producto {self.nombre}>"
 
 
-# ── Decorators ──────────────────────────────────────────────
+# ── Decorators y utilidades de sesión ───────────────────────
+# ── CSRF focalizado ─────────────────────────────────────────
+# Sin depender de Flask-WTF: token por sesión, validado SOLO en los endpoints
+# de mayor riesgo (auth, OTP, cambio de clave, carrito, POS).
+# (Integrado desde origin/Lesly; se quitaron de la lista las rutas muertas
+#  procesar_pago y las que no existen en esta rama.)
+_CSRF_PROTEGIDAS = {
+    'login', 'login_cliente', 'registro_cliente', 'verificar_registro',
+    'recuperar_contrasena', 'restablecer_contrasena', 'cambiar_clave',
+    'carrito_confirmar_v2', 'carrito_agregar',
+    'registrar_pos',
+}
+
+
+def _obtener_csrf_token():
+    token = session.get('_csrf_token')
+    if not token:
+        token = secrets.token_hex(32)
+        session['_csrf_token'] = token
+    return token
+
+
+@app.context_processor
+def _ctx_csrf_token():
+    return {'csrf_token': _obtener_csrf_token()}
+
+
+@app.before_request
+def _validar_csrf():
+    if request.method not in ('POST', 'PUT', 'PATCH', 'DELETE'):
+        return None
+    if request.endpoint not in _CSRF_PROTEGIDAS:
+        return None
+    procedente = request.form.get('csrf_token') \
+        or request.headers.get('X-CSRFToken') \
+        or (request.get_json(silent=True) or {}).get('csrf_token')
+    if procedente and hmac.compare_digest(str(procedente), session.get('_csrf_token', '')):
+        return None
+    return abort(400)
+
+
+@app.context_processor
+def _ctx_recuperacion_origen():
+    """Determina desde qué login se llegó a recuperar_contrasena (admin | cliente)."""
+    return {'recuperar_origen': request.values.get('origen', 'cliente')}
+
+
 # Rutas de cliente (públicas/catálogo) que deben redirigir a /login_cliente,
 # no al login administrativo
-_RUTAS_CLIENTE = ('/carrito', '/mis_pedidos', '/procesar_pago', '/carrito/confirmar')
+_RUTAS_CLIENTE = ('/carrito', '/mis_pedidos')
 
 
 def login_required(f):
@@ -308,8 +356,9 @@ def login_cliente():
 @app.route('/logout')
 @login_required
 def logout():
+    es_cliente = session.get('rol') == 'cliente'
     session.clear()
-    return redirect(url_for('login'))
+    return redirect(url_for('login_cliente') if es_cliente else url_for('login'))
 
 
 
@@ -356,17 +405,17 @@ def productos():
         cursor.execute("SELECT COUNT(*) AS cnt FROM venta")
         pedidos_count = cursor.fetchone()['cnt']
     except Exception:
-        pass
+        app.logger.exception("Error contando ventas en dashboard de productos")
     try:
         cursor.execute("SELECT COUNT(*) AS cnt FROM alerta WHERE resuelta = FALSE")
         alertas_count = cursor.fetchone()['cnt']
     except Exception:
-        pass
+        app.logger.exception("Error contando alertas en dashboard de productos")
     try:
         cursor.execute("SELECT COUNT(*) AS cnt FROM inventario_movimiento WHERE DATE(fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima') = CURRENT_DATE")
         movimientos_count = cursor.fetchone()['cnt']
     except Exception:
-        pass
+        app.logger.exception("Error contando movimientos de inventario del día en dashboard de productos")
     try:
         cursor.execute("""
             SELECT id_producto, nombre, stock, stock_minimo, precio
@@ -374,7 +423,7 @@ def productos():
         """)
         bajo_stock = cursor.fetchall()
     except Exception:
-        pass
+        app.logger.exception("Error consultando productos con bajo stock en dashboard de productos")
 
     conn.close()
 
@@ -411,7 +460,7 @@ def producto_detalle(id):
         """, (id,))
         movimientos = cursor.fetchall()
     except Exception:
-        pass
+        app.logger.exception("Error consultando detalle/movimientos del producto %s", id)
     finally:
         conn.close()
     return render_template('producto_detalle.html', producto=producto, movimientos=movimientos,
@@ -949,6 +998,97 @@ def eliminar_cliente(id):
     return redirect(url_for('clientes'))
 
 
+# ── Registro rápido de cliente desde el Punto de Venta (por DNI/RUC) ──────
+# Boleta  → DNI (8 dígitos) + nombre (autocompletado vía RENIEC en el frontend).
+# Factura → RUC (11 dígitos, inicia en 10 o 20) + razón social + dirección fiscal.
+# id_tipo_documento: 1 = DNI, 6 = RUC (catálogo SUNAT). Los clientes POS se
+# crean con origen='pos' y sin email ni contraseña (no pueden iniciar sesión
+# web, pero sí aparecen en ventas/reportes).
+# (Integrado desde origin/Lesly; consulta RUC/DNI va por /api/consultar_* del
+#  frontend, nunca con token expuesto.)
+@app.route('/clientes/registrar_pos', methods=['POST'])
+@login_required
+@escritura_required
+def registrar_pos():
+    data = request.get_json(silent=True) or {}
+    tipo = (data.get('tipo') or 'boleta').strip().lower()
+    if tipo not in ('boleta', 'factura'):
+        return {'ok': False, 'error': 'Tipo de comprobante inválido.'}, 400
+
+    nombre    = (data.get('nombre') or '').strip()
+    telefono  = (data.get('telefono') or '').strip()
+    apellido  = (data.get('apellido') or '').strip()
+    direccion = (data.get('direccion') or '').strip()
+
+    if tipo == 'boleta':
+        doc = (data.get('dni') or '').strip()
+        if not doc.isdigit() or len(doc) != 8:
+            return {'ok': False, 'error': 'El DNI debe tener exactamente 8 dígitos.'}, 400
+        if len(nombre) < 3:
+            return {'ok': False, 'error': 'El nombre del cliente es obligatorio (mínimo 3 caracteres).'}, 400
+    else:
+        doc = (data.get('ruc') or '').strip()
+        if not doc.isdigit() or len(doc) != 11 or doc[:2] not in ('10', '20'):
+            return {'ok': False, 'error': 'El RUC debe tener 11 dígitos y comenzar con 10 o 20.'}, 400
+        if len(nombre) < 3:
+            return {'ok': False, 'error': 'La razón social es obligatoria (mínimo 3 caracteres).'}, 400
+        if len(direccion) < 5:
+            return {'ok': False, 'error': 'La dirección fiscal es obligatoria para factura (mínimo 5 caracteres).'}, 400
+
+    if telefono and (not telefono.isdigit() or len(telefono) != 9):
+        return {'ok': False, 'error': 'El teléfono debe tener exactamente 9 dígitos.'}, 400
+
+    id_tipo_doc = 1 if tipo == 'boleta' else 6
+    conn   = get_connection_auth()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        # ¿Ya existe un cliente con ese documento? → se reutiliza (no se duplica)
+        cursor.execute("""
+            SELECT id_cliente, nombre, apellido, telefono FROM cliente
+            WHERE id_tipo_documento = %s AND nro_documento = %s
+        """, (id_tipo_doc, doc))
+        existente = cursor.fetchone()
+        if existente:
+            if telefono and not (existente.get('telefono') or '').strip():
+                cursor.execute(
+                    "UPDATE cliente SET telefono = %s WHERE id_cliente = %s",
+                    (telefono, existente['id_cliente']))
+                conn.commit()
+            nombre_existente = f"{existente.get('nombre') or ''} {existente.get('apellido') or ''}".strip()
+            return {'ok': True, 'id_cliente': existente['id_cliente'],
+                    'nombre': nombre_existente, 'ya_existia': True}
+
+        # `apellido` es NOT NULL en la BD. Si no se envió y es boleta (RENIEC:
+        # Nombres ApellidoPaterno ApellidoMaterno), separamos el nombre completo;
+        # como último recurso usamos '' (respeta NOT NULL). En factura, la razón
+        # social se guarda completa en `nombre` y `apellido` queda ''.
+        nombre_db   = nombre
+        apellido_db = apellido
+        if not apellido_db and tipo == 'boleta':
+            partes = nombre.split()
+            if len(partes) >= 2:
+                nombre_db   = partes[0]
+                apellido_db = ' '.join(partes[1:])
+        cursor.execute("""
+            INSERT INTO cliente (nombre, apellido, email, telefono, id_tipo_documento,
+                                 nro_documento, direccion, contrasena, activo, origen)
+            VALUES (%s, %s, NULL, %s, %s, %s, %s, NULL, TRUE, 'pos')
+            RETURNING id_cliente
+        """, (nombre_db, apellido_db, telefono or None, id_tipo_doc, doc,
+              direccion or None))
+        id_cliente = cursor.fetchone()['id_cliente']
+        conn.commit()
+        nombre_mostrar = f"{nombre_db} {apellido_db}".strip()
+        return {'ok': True, 'id_cliente': id_cliente, 'nombre': nombre_mostrar,
+                'ya_existia': False}
+    except Exception:
+        conn.rollback()
+        app.logger.exception("Error al registrar cliente desde el POS")
+        return {'ok': False, 'error': 'No se pudo guardar el cliente. Intenta de nuevo.'}, 500
+    finally:
+        conn.close()
+
+
 # ── Inventario ────────────────────────────────────────────────
 @app.route('/inventario')
 @login_required
@@ -1045,7 +1185,7 @@ def registrar_movimiento():
                 observacion = f"Vendedor: {nombre_vendedor}" + (f" - {observacion}" if observacion else "")
         except Exception:
             # no crítico, continuar con la observación sin nombre
-            pass
+            app.logger.exception("Error consultando nombre del vendedor id=%s para observación", id_vendedor)
 
     # Para compatibilidad con la estructura actual, solo llenamos id_proveedor para entradas.
     proveedor_db_value = id_proveedor if tipo == 'entrada' and id_proveedor else None
@@ -1140,7 +1280,7 @@ def editar_proveedor(id):
     return render_template('proveedor_form.html', proveedor=proveedor)
 
 
-@app.route('/proveedores/eliminar/<int:id>')
+@app.route('/proveedores/eliminar/<int:id>', methods=['GET', 'POST'])
 @login_required
 @admin_required
 def eliminar_proveedor(id):
@@ -1156,27 +1296,6 @@ def eliminar_proveedor(id):
     finally:
         conn.close()
     return redirect(url_for('proveedores'))
-
-
-# Reemplazar/añadir la vista de eliminación evitando sobrescribir un endpoint existente.
-# Si ya existe otra función llamada eliminar_proveedor, esta usa un nombre de función y endpoint distintos.
-@app.route('/proveedores/eliminar/<int:proveedor_id>', methods=['POST'], endpoint='eliminar_proveedor_post')
-def eliminar_proveedor_post(proveedor_id):
-    # Verificar sesión / permisos básicos
-    if not session.get('usuario_id'):
-        flash('Acceso no autorizado.', 'danger')
-        return redirect('/login')
-
-    try:
-        # Borrado parametrizado para evitar inyecciones
-        db.session.execute(text("DELETE FROM proveedor WHERE id_proveedor = :id"), {'id': proveedor_id})
-        db.session.commit()
-        flash('Proveedor eliminado correctamente.', 'success')
-    except Exception as e:
-        db.session.rollback()
-        flash('Error al eliminar proveedor. Revise dependencias o logs.', 'danger')
-        app.logger.exception("Error eliminando proveedor %s: %s", proveedor_id, e)
-    return redirect('/proveedores')
 
 
 # ── Pedidos ─────────────────────────────────────────────────
@@ -1236,9 +1355,13 @@ def pedidos():
             estado = ped.get('estado') or 'pendiente'
             ped['idx_actual'] = PASOS.index(estado) if estado in PASOS else -1
             ped['progreso'] = int((ped['idx_actual'] + 1) * 20) if ped['idx_actual'] >= 0 else 0
+            # Venta local ya cobrada: NO aplica el flujo de despacho/entrega.
+            ped['es_local_entregado'] = (ped.get('tipo_venta') == 'local' and estado == 'entregado')
             nombre   = ped.get('cliente_nombre') or 'Cliente'
             telefono = (ped.get('cliente_telefono') or '').strip()
-            if telefono:
+            # El aviso por WhatsApp ("pedido procesado y listo") es del flujo
+            # ONLINE (delivery). Las ventas locales se entregan en mostrador.
+            if telefono and ped.get('tipo_venta') != 'local':
                 from urllib.parse import quote
                 if telefono.startswith('+'):
                     telefono = telefono[1:]
@@ -1271,8 +1394,10 @@ def venta_nueva_form():
         conn_a   = get_connection_auth()
         cursor_a = conn_a.cursor(dictionary=True)
         cursor_a.execute("""
-            SELECT id_cliente, CONCAT(nombre, ' ', COALESCE(apellido,'')) AS nombre, telefono
-            FROM cliente WHERE activo = TRUE ORDER BY nombre
+            SELECT c.id_cliente,
+                   CONCAT(c.nombre, ' ', COALESCE(c.apellido,'')) AS nombre,
+                   c.telefono
+            FROM cliente c WHERE COALESCE(c.activo, TRUE) = TRUE ORDER BY c.nombre
         """)
         clientes = cursor_a.fetchall()
         conn_a.close()
@@ -1286,14 +1411,29 @@ def venta_nueva_form():
         productos = cursor.fetchall()
         conn.close()
     except Exception as e:
-        print(f"ERROR en /ventas/nueva GET: {e}")
-    return render_template('venta_form.html', clientes=clientes, productos=productos)
+        app.logger.exception("Error en /ventas/nueva GET: %s", e)
+    # Token de un solo uso: cada formulario solo puede cobrar UNA vez.
+    # Evita dobles cobros por doble clic / re-envío del mismo POST.
+    if not session.get('venta_token'):
+        session['venta_token'] = secrets.token_hex(16)
+    return render_template('venta_form.html', clientes=clientes, productos=productos,
+                           venta_token=session.get('venta_token'))
 
 
 @app.route('/ventas/nueva', methods=['POST'])
 @login_required
 @escritura_required
 def venta_nueva_guardar():
+    # Protección anti doble cobro: el token se genera en cada GET y se consume
+    # con la primera venta. Si se re-envía el mismo formulario (doble clic,
+    # F5/back + submit) el token ya no coincide y se rechaza el duplicado.
+    venta_token = request.form.get('venta_token')
+    if session.get('venta_token') and venta_token != session['venta_token']:
+        flash('Esta venta ya fue registrada: no se permite un doble cobro.', 'warning')
+        return redirect(url_for('pedidos'))
+    # Consumir el ticket: esta página de cobro no puede volver a procesarse.
+    session['venta_token'] = secrets.token_hex(16)
+
     id_cliente   = request.form.get('id_cliente') or None
     tipo_venta   = request.form.get('tipo_venta', 'local')
     metodo_pago  = request.form.get('metodo_pago', 'efectivo')
@@ -1304,6 +1444,9 @@ def venta_nueva_guardar():
 
     if not ids_producto:
         flash('Debes agregar al menos un producto.', 'danger')
+        return redirect(url_for('venta_nueva_form'))
+    if not id_cliente:
+        flash('Debes seleccionar un cliente para la venta.', 'danger')
         return redirect(url_for('venta_nueva_form'))
 
     conn   = get_connection_tienda()
@@ -1319,29 +1462,53 @@ def venta_nueva_guardar():
                 flash('No puedes registrar una venta local sin una caja abierta. Abre caja primero en /caja.', 'danger')
                 return redirect(url_for('caja'))
 
-        # Crear la venta
+        # Crear la venta. Las ventas LOCALES (mostrador) se entregan al momento:
+        # se crean directamente en estado 'entregado'; solo los pedidos online
+        # pasan por estados intermedios (pendiente, procesando, enviado).
+        estado_inicial = 'entregado' if tipo_venta == 'local' else 'pendiente'
         cursor.execute("""
             INSERT INTO venta (id_tipo_venta, id_cliente, id_usuario_vendedor, id_estado_venta)
             VALUES ((SELECT id_tipo_venta FROM tipo_venta WHERE nombre = %s), %s, %s,
-                    (SELECT id_estado_venta FROM estado_venta WHERE nombre = 'pendiente'))
+                    (SELECT id_estado_venta FROM estado_venta WHERE nombre = %s))
             RETURNING id_venta
-        """, (tipo_venta, id_cliente, session.get('usuario_id')))
+        """, (tipo_venta, id_cliente, session.get('usuario_id'), estado_inicial))
         id_venta = cursor.fetchone()['id_venta']
 
-        # Insertar cada ítem y descontar stock
+        # Insertar cada ítem, descontar stock y registrar el movimiento de salida
         for id_prod, cant in zip(ids_producto, cantidades):
-            cant = int(cant) if cant else 1
-            cursor.execute("SELECT precio, stock FROM producto WHERE id_producto = %s", (id_prod,))
+            try:
+                cant = int(cant) if cant else 1
+            except (TypeError, ValueError):
+                cant = 1
+            if cant <= 0:
+                raise ValueError("Las cantidades deben ser mayores a cero.")
+            cursor.execute("SELECT precio, stock, nombre FROM producto WHERE id_producto = %s", (id_prod,))
             prod = cursor.fetchone()
             if not prod:
                 continue
+            # No permitir vender más stock del disponible (evita stock negativo)
+            if cant > (prod['stock'] or 0):
+                raise ValueError(
+                    f"Stock insuficiente de \"{prod['nombre']}\" "
+                    f"(disponible: {prod['stock']} unidades). Venta no registrada."
+                )
             cursor.execute("""
                 INSERT INTO detalle_venta (id_venta, id_producto, cantidad, precio_unitario)
                 VALUES (%s, %s, %s, %s)
             """, (id_venta, id_prod, cant, prod['precio']))
             cursor.execute("""
                 UPDATE producto SET stock = stock - %s WHERE id_producto = %s
+                RETURNING stock
             """, (cant, id_prod))
+            nuevo_stock = cursor.fetchone()['stock']
+            cursor.execute("""
+                INSERT INTO inventario_movimiento
+                    (tipo, id_producto, id_proveedor, cantidad, precio_unitario,
+                     observacion, id_usuario, stock_resultante)
+                VALUES ('salida', %s, NULL, %s, %s, %s, %s, %s)
+            """, (id_prod, cant, prod['precio'],
+                  f'Venta {"local" if tipo_venta == "local" else "online"} #{id_venta}',
+                  session.get('usuario_id'), nuevo_stock))
 
         # Registrar el pago y el ingreso en caja para ventas locales
         if tipo_venta == 'local' and caja_activa:
@@ -1357,12 +1524,52 @@ def venta_nueva_guardar():
             """, (caja_activa['id_caja'], f'Venta local #{id_venta}',
                   session.get('usuario_id'), id_venta))
 
+        # ── Comprobante de la venta local (boleta/factura) ────────────
+        # En la misma transacción junto con pago, caja, stock y movimientos.
+        # Tipo: lo decide el modal POS (comp_tipo); por defecto boleta.
+        # Numeración: correlativa por serie vía helper (B000001 / F000001).
+        if tipo_venta == 'local':
+            comp_tipo = request.form.get('comp_tipo', 'boleta').strip().lower()
+            tipo_comp_db = 'factura' if comp_tipo == 'factura' else 'boleta'
+            doc_cliente = (request.form.get('comp_doc') or '').strip() or None
+            if tipo_comp_db == 'factura' and (not doc_cliente or len(doc_cliente) != 11):
+                flash('Factura requiere un RUC válido (11 dígitos). Se emitió boleta.', 'warning')
+                tipo_comp_db = 'boleta'
+                doc_cliente = None
+            num_comp = _siguiente_numero_comprobante(cursor, tipo_comp_db)
+            # Totales calculados a partir del detalle (precios con IGV 18% incluido)
+            cursor.execute("""
+                SELECT COALESCE(SUM(cantidad * precio_unitario), 0) AS total
+                FROM detalle_venta WHERE id_venta = %s
+            """, (id_venta,))
+            _total        = round(float(cursor.fetchone()['total'] or 0), 2)
+            _subtotal     = round(_total / 1.18, 2)
+            _igv          = round(_total - _subtotal, 2)
+            cursor.execute("""
+                INSERT INTO comprobante
+                    (id_venta, id_tipo_comprobante, numero, ruc, serie, subtotal, igv, total)
+                VALUES (%s, (SELECT id_tipo_comprobante FROM tipo_comprobante WHERE nombre = %s),
+                        %s, %s, %s, %s, %s, %s)
+            """, (id_venta, tipo_comp_db, num_comp,
+                  doc_cliente if tipo_comp_db == 'factura' else None,
+                  'F001' if tipo_comp_db == 'factura' else 'B001',
+                  _subtotal, _igv, _total))
+
         conn.commit()
         flash(f'Venta #{id_venta} registrada correctamente.', 'success')
+        # Solo ventas LOCALES: tras cobrar, mostrar el comprobante (boleta/factura).
+        if tipo_venta == 'local':
+            return redirect(url_for('comprobante_venta', id_venta=id_venta))
         return redirect(url_for('pedidos'))
 
-    except Exception as e:
-        print(f"ERROR al guardar venta: {e}")
+    except ValueError as e:
+        # Error de negocio (stock insuficiente, cantidad inválida): mensaje claro.
+        conn.rollback()
+        flash(str(e), 'danger')
+        return redirect(url_for('venta_nueva_form'))
+    except Exception:
+        conn.rollback()
+        app.logger.exception("Error al guardar venta local")
         flash('Error al registrar la venta. Intenta de nuevo.', 'danger')
         return redirect(url_for('venta_nueva_form'))
     finally:
@@ -1378,13 +1585,21 @@ UMBRAL_DIFERENCIA_CAJA = 20.0
 @login_required
 @escritura_required
 def caja():
-    """Panel de caja: estado actual, movimientos del turno e historial de cierres."""
+    """Panel de caja: estado actual, movimientos del turno, resumen por método
+    de pago e historial de cierres.
+
+    REGLA ECONÓMICA DE LA CAJA FÍSICA (integrada desde origin/Lesly):
+      EFECTIVO esperado = fondo inicial + ventas locales pagadas en EFECTIVO − egresos
+    Yape/Plin y Tarjeta son pagos DIGITALES: se muestran aparte como resumen y
+    NO forman parte del dinero físico de la caja (no suben el esperado).
+    """
     conn   = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
     caja_abierta = None
     movimientos  = []
-    efectivo_sistema = 0.0
     historial = []
+    resumen   = {}
+    digitales_por_caja = {}
     uids = set()
     try:
         cursor.execute("SELECT * FROM caja WHERE estado = 'abierta' LIMIT 1")
@@ -1395,11 +1610,6 @@ def caja():
                 WHERE id_caja = %s ORDER BY fecha DESC
             """, (caja_abierta['id_caja'],))
             movimientos = cursor.fetchall()
-            # Solo existen 'ingreso' y 'egreso' (CHECK de la tabla)
-            efectivo_sistema = sum(
-                float(m['monto']) if m['tipo'] == 'ingreso' else -float(m['monto'])
-                for m in movimientos
-            )
             uids.add(caja_abierta['id_usuario_apertura'])
             uids.update(m['id_usuario'] for m in movimientos if m['id_usuario'])
 
@@ -1410,6 +1620,60 @@ def caja():
         for h in historial:
             if h['id_usuario_apertura']: uids.add(h['id_usuario_apertura'])
             if h['id_usuario_cierre']:   uids.add(h['id_usuario_cierre'])
+
+        # ── Resumen económico por caja (ventas LOCALES con pago confirmado) ──
+        caja_ids = ([caja_abierta['id_caja']] if caja_abierta else []) \
+                 + [h['id_caja'] for h in historial]
+        if caja_ids:
+            cursor.execute("""
+                SELECT p.id_caja, tp.nombre AS metodo,
+                       COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS total
+                FROM pago p
+                JOIN venta v       ON v.id_venta = p.id_venta
+                JOIN tipo_venta tv ON v.id_tipo_venta = tv.id_tipo_venta
+                JOIN tipo_pago tp  ON p.id_tipo_pago = tp.id_tipo_pago
+                LEFT JOIN detalle_venta d ON d.id_venta = v.id_venta
+                WHERE tv.nombre = 'local' AND p.estado = 'confirmado'
+                  AND p.id_caja = ANY(%s)
+                GROUP BY p.id_caja, tp.nombre
+            """, (caja_ids,))
+            ventas_por_caja = {}
+            for r in cursor.fetchall():
+                ventas_por_caja.setdefault(r['id_caja'], {})[r['metodo']] = float(r['total'] or 0)
+
+            cursor.execute("""
+                SELECT id_caja, COALESCE(SUM(monto), 0) AS total
+                FROM movimiento_caja
+                WHERE id_caja = ANY(%s) AND tipo = 'egreso'
+                GROUP BY id_caja
+            """, (caja_ids,))
+            egresos_por_caja = {r['id_caja']: float(r['total'] or 0)
+                                for r in cursor.fetchall()}
+
+            for row in ([caja_abierta] if caja_abierta else []) + historial:
+                met    = ventas_por_caja.get(row['id_caja'], {})
+                fondo  = float(row.get('monto_apertura') or 0)
+                ven_ef = met.get('efectivo', 0.0)
+                yape   = met.get('yape_plin', 0.0)
+                tar    = met.get('tarjeta', 0.0)
+                egres  = egresos_por_caja.get(row['id_caja'], 0.0)
+                esperado = fondo + ven_ef - egres
+                digitales_por_caja[row['id_caja']] = {
+                    'yape': yape,
+                    'tarjeta': tar,
+                    'total_digital': yape + tar,
+                    'ventas_efectivo': ven_ef,
+                }
+                if caja_abierta and row['id_caja'] == caja_abierta['id_caja']:
+                    resumen = {
+                        'fondo':           fondo,
+                        'ventas_efectivo': ven_ef,
+                        'yape':            yape,
+                        'tarjeta':         tar,
+                        'total_ventas':    ven_ef + yape + tar,
+                        'egresos':         egres,
+                        'esperado':        esperado,
+                    }
     except Exception as e:
         app.logger.exception("Error en /caja: %s", e)
     finally:
@@ -1426,12 +1690,13 @@ def caja():
             nombres = {u['id_usuario']: u['nombres'] for u in cur_a.fetchall()}
             conn_a.close()
         except Exception:
-            pass
+            app.logger.exception("Error consultando nombres de usuarios de caja en la BD Auth")
 
     return render_template('caja.html',
                            caja=caja_abierta,
                            movimientos=movimientos,
-                           efectivo_sistema=efectivo_sistema,
+                           resumen=resumen,
+                           digitales=digitales_por_caja,
                            historial=historial,
                            nombres=nombres,
                            umbral=UMBRAL_DIFERENCIA_CAJA)
@@ -1483,11 +1748,55 @@ def caja_abrir():
     return redirect(url_for('caja'))
 
 
+@app.route('/caja/egreso', methods=['POST'])
+@login_required
+@escritura_required
+def caja_egreso():
+    """Registra un EGRESO (gasto/salida de efectivo) de la caja abierta.
+    Descuenta del efectivo esperado del cierre. (Integrado desde origin/Lesly.)"""
+    concepto = request.form.get('concepto', '').strip()
+    try:
+        monto = float(request.form.get('monto', '0') or 0)
+    except ValueError:
+        monto = -1
+    if not concepto:
+        flash('El concepto del egreso es obligatorio.', 'danger')
+        return redirect(url_for('caja'))
+    if monto <= 0:
+        flash('El monto del egreso debe ser mayor que cero.', 'danger')
+        return redirect(url_for('caja'))
+
+    conn   = get_connection_tienda()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT id_caja FROM caja WHERE estado = 'abierta' LIMIT 1")
+        caja = cursor.fetchone()
+        if not caja:
+            flash('No hay ninguna caja abierta. Abre la caja para registrar egresos.', 'danger')
+            return redirect(url_for('caja'))
+
+        cursor.execute("""
+            INSERT INTO movimiento_caja (id_caja, tipo, monto, concepto, id_usuario)
+            VALUES (%s, 'egreso', %s, %s, %s)
+        """, (caja['id_caja'], monto, concepto, session.get('usuario_id')))
+        conn.commit()
+        flash(f'Egreso registrado en la caja #{caja["id_caja"]}: {concepto} por S/ {monto:.2f}.', 'success')
+    except Exception:
+        conn.rollback()
+        app.logger.exception("Error registrando egreso de caja")
+        flash('No se pudo registrar el egreso.', 'danger')
+    finally:
+        conn.close()
+    return redirect(url_for('caja'))
+
+
 @app.route('/caja/cerrar', methods=['POST'])
 @login_required
 @escritura_required
 def caja_cerrar():
-    """Cierra la caja abierta: calcula el esperado y registra la diferencia."""
+    """Cierra la caja abierta: calcula el EFECTIVO esperado
+    (fondo + ventas en efectivo − egresos) y registra la diferencia.
+    (Separación efectivo/digital integrada desde origin/Lesly.)"""
     try:
         declarado = float(request.form.get('monto_declarado', '0') or 0)
     except ValueError:
@@ -1504,15 +1813,48 @@ def caja_cerrar():
             flash('No hay ninguna caja abierta para cerrar.', 'danger')
             return redirect(url_for('caja'))
 
-        cursor.execute("""
-            SELECT COALESCE(SUM(CASE WHEN tipo = 'ingreso' THEN monto ELSE -monto END), 0) AS sistema
-            FROM movimiento_caja WHERE id_caja = %s
-        """, (caja['id_caja'],))
-        sistema = float(cursor.fetchone()['sistema'])
-        diferencia = declarado - sistema
+        id_caja = caja['id_caja']
+        fondo   = float(caja.get('monto_apertura') or 0)
 
-        # El cierre se refleja solo en la fila de caja (sin movimiento_caja 'cierre');
-        # los montos quedan en la propia caja y sus movimientos del turno.
+        # Ventas LOCALES pagadas en EFECTIVO (el único dinero físico que entra)
+        cursor.execute("""
+            SELECT COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS total
+            FROM pago p
+            JOIN venta v       ON v.id_venta = p.id_venta
+            JOIN tipo_venta tv ON v.id_tipo_venta = tv.id_tipo_venta
+            JOIN tipo_pago tp  ON p.id_tipo_pago = tp.id_tipo_pago
+            LEFT JOIN detalle_venta d ON d.id_venta = v.id_venta
+            WHERE tv.nombre = 'local' AND p.estado = 'confirmado'
+              AND p.id_caja = %s AND tp.nombre = 'efectivo'
+        """, (id_caja,))
+        ventas_efectivo = float(cursor.fetchone()['total'] or 0)
+
+        # Egresos del turno (descuentan del efectivo esperado)
+        cursor.execute("""
+            SELECT COALESCE(SUM(monto), 0) AS total
+            FROM movimiento_caja WHERE id_caja = %s AND tipo = 'egreso'
+        """, (id_caja,))
+        egresos = float(cursor.fetchone()['total'] or 0)
+
+        esperado = fondo + ventas_efectivo - egresos
+        diferencia = declarado - esperado
+
+        # Pagos DIGITALES del turno (resumen informativo; NO afectan el efectivo)
+        cursor.execute("""
+            SELECT tp.nombre AS metodo, COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS total
+            FROM pago p
+            JOIN venta v       ON v.id_venta = p.id_venta
+            JOIN tipo_venta tv ON v.id_tipo_venta = tv.id_tipo_venta
+            JOIN tipo_pago tp  ON p.id_tipo_pago = tp.id_tipo_pago
+            LEFT JOIN detalle_venta d ON d.id_venta = v.id_venta
+            WHERE tv.nombre = 'local' AND p.estado = 'confirmado'
+              AND p.id_caja = %s AND tp.nombre IN ('yape_plin', 'tarjeta')
+            GROUP BY tp.nombre
+        """, (id_caja,))
+        digital = {r['metodo']: float(r['total'] or 0) for r in cursor.fetchall()}
+        yape, tarjeta = digital.get('yape_plin', 0.0), digital.get('tarjeta', 0.0)
+
+        # El cierre se refleja solo en la fila de caja (sin movimiento_caja 'cierre')
         cursor.execute("""
             UPDATE caja
             SET estado = 'cerrada',
@@ -1523,17 +1865,24 @@ def caja_cerrar():
                 diferencia = %s,
                 observaciones = %s
             WHERE id_caja = %s
-        """, (session.get('usuario_id'), sistema, declarado, diferencia,
-              observaciones, caja['id_caja']))
+        """, (session.get('usuario_id'), esperado, declarado, diferencia,
+              observaciones, id_caja))
         conn.commit()
 
+        mensaje = (
+            f'Caja #{id_caja} cerrada. EFECTIVO: fondo S/ {fondo:.2f} + ventas '
+            f'efectivo S/ {ventas_efectivo:.2f} − egresos S/ {egresos:.2f} '
+            f'= esperado S/ {esperado:.2f} | '
+            f'PAGOS DIGITALES: Yape/Plin S/ {yape:.2f}, Tarjeta S/ {tarjeta:.2f} | '
+            f'Diferencia: S/ {diferencia:+.2f}.'
+        )
         if abs(diferencia) > UMBRAL_DIFERENCIA_CAJA:
-            flash(f'Caja #{caja["id_caja"]} cerrada. ⚠ Diferencia de S/ {diferencia:+.2f} supera el umbral (S/ {UMBRAL_DIFERENCIA_CAJA:.0f}).', 'warning')
+            flash(mensaje + f' ⚠ La diferencia supera el umbral (S/ {UMBRAL_DIFERENCIA_CAJA:.0f}).', 'warning')
         else:
-            flash(f'Caja #{caja["id_caja"]} cerrada. Diferencia: S/ {diferencia:+.2f}.', 'success')
-    except Exception as e:
+            flash(mensaje, 'success')
+    except Exception:
         conn.rollback()
-        app.logger.exception("Error cerrando caja: %s", e)
+        app.logger.exception("Error cerrando caja")
         flash('No se pudo cerrar la caja.', 'danger')
     finally:
         conn.close()
@@ -1572,11 +1921,13 @@ def pedido_detalle(id):
             cursor_a = conn_a.cursor(dictionary=True)
             if pedido.get('id_cliente'):
                 cursor_a.execute(
-                    "SELECT nombre, apellido, telefono FROM cliente WHERE id_cliente = %s",
+                    "SELECT nombre, apellido, telefono, nro_documento, direccion FROM cliente WHERE id_cliente = %s",
                     (pedido['id_cliente'],))
                 cli = cursor_a.fetchone() or {}
-                pedido['cliente_nombre']   = (f"{cli.get('nombre') or ''} {cli.get('apellido') or ''}").strip()
-                pedido['cliente_telefono'] = cli.get('telefono')
+                pedido['cliente_nombre']    = (f"{cli.get('nombre') or ''} {cli.get('apellido') or ''}").strip()
+                pedido['cliente_telefono']  = cli.get('telefono')
+                pedido['cliente_documento'] = (cli.get('nro_documento') or '').strip() or None
+                pedido['cliente_direccion'] = (cli.get('direccion') or '').strip() or None
             if pedido.get('id_usuario_vendedor'):
                 cursor_a.execute(
                     "SELECT nombres FROM usuario WHERE id_usuario = %s",
@@ -1596,17 +1947,179 @@ def pedido_detalle(id):
             comprobante = cursor.fetchone()
         except Exception:
             comprobante = None
-    except Exception as e:
-        print(f"ERROR pedido_detalle: {e}")
+    except Exception:
+        app.logger.exception("Error pedido_detalle %s", id)
     finally:
         conn.close()
+    # Fases válidas leídas de la BD (misma fuente que el panel admin y el
+    # cliente), para que el timeline siempre muestre nombres consistentes.
+    PASOS = []
+    try:
+        conn_f   = get_connection_tienda()
+        cursor_f = conn_f.cursor(dictionary=True)
+        cursor_f.execute("SELECT nombre FROM estado_venta WHERE activo = TRUE ORDER BY orden")
+        PASOS = [r['nombre'] for r in cursor_f.fetchall()]
+        conn_f.close()
+    except Exception:
+        PASOS = []
+    PASOS = [f for f in PASOS if f != 'cancelado']
+    if not PASOS:
+        PASOS = ['pendiente', 'procesando', 'enviado', 'entregado']
     # Calcular idx_actual en Python para evitar el error .index() en Jinja2
-    PASOS = ['pendiente', 'procesando', 'enviado', 'entregado']
     estado_actual = (pedido.get('estado') or 'pendiente') if pedido else 'pendiente'
     idx_actual = PASOS.index(estado_actual) if estado_actual in PASOS else 0
     return render_template('pedido_detalle.html', pedido=pedido, items=items,
                            comprobante=comprobante, id=id,
-                           idx_actual=idx_actual, fases_orden=PASOS)
+                           idx_actual=idx_actual, fases_orden=PASOS,
+                           estados=PASOS)
+
+@app.route('/ventas/<int:id_venta>/comprobante')
+@login_required
+@escritura_required   # mismo control que ventas/caja: solo administrador y vendedor
+def comprobante_venta(id_venta):
+    """Muestra el comprobante (boleta/factura SIMULADA) de una venta.
+
+    Si la venta aún no tiene registro en la tabla comprobante, se crea aquí
+    mismo (numeración correlativa + subtotal/igv/total) dentro de una
+    transacción; si ya existía solo se lee. Nunca falla por datos parciales:
+    cliente sin DNI, vendedor nulo, etc. se muestran como campos vacíos.
+    """
+    formato = 'ticket' if request.args.get('formato') == 'ticket' else 'a4'
+
+    conn   = get_connection_tienda()
+    cursor = conn.cursor(dictionary=True)
+    venta = comprobante = None
+    items = []
+    metodo_pago = None
+    try:
+        cursor.execute("""
+            SELECT v.*, tv.nombre AS tipo_venta, ev.nombre AS estado_venta
+            FROM venta v
+            LEFT JOIN tipo_venta tv   ON v.id_tipo_venta   = tv.id_tipo_venta
+            LEFT JOIN estado_venta ev ON v.id_estado_venta  = ev.id_estado_venta
+            WHERE v.id_venta = %s
+        """, (id_venta,))
+        venta = cursor.fetchone()
+        if not venta:
+            abort(404)
+
+        cursor.execute("""
+            SELECT d.id_detalle, d.cantidad, d.precio_unitario,
+                   COALESCE(d.nombre_producto, p.nombre) AS descripcion,
+                   ROUND(d.cantidad * d.precio_unitario, 2) AS importe
+            FROM detalle_venta d
+            LEFT JOIN producto p ON d.id_producto = p.id_producto
+            WHERE d.id_venta = %s
+            ORDER BY d.id_detalle
+        """, (id_venta,))
+        items = cursor.fetchall()
+
+        # Método de pago registrado (efectivo / tarjeta / yape_plin)
+        cursor.execute("""
+            SELECT tp.nombre FROM pago p
+            JOIN tipo_pago tp ON p.id_tipo_pago = tp.id_tipo_pago
+            WHERE p.id_venta = %s LIMIT 1
+        """, (id_venta,))
+        fila_pago = cursor.fetchone()
+        metodo_pago = fila_pago['nombre'] if fila_pago else None
+
+        # Comprobante: leer o crear si falta
+        cursor.execute("""
+            SELECT c.*, tc.nombre AS tipo
+            FROM comprobante c
+            LEFT JOIN tipo_comprobante tc ON c.id_tipo_comprobante = tc.id_tipo_comprobante
+            WHERE c.id_venta = %s LIMIT 1
+        """, (id_venta,))
+        comprobante = cursor.fetchone()
+
+        # Totales desde el detalle (precios con IGV 18% incluido)
+        total_calc    = round(sum(float(i['importe'] or 0) for i in items), 2)
+        subtotal_calc = round(total_calc / 1.18, 2)
+        igv_calc      = round(total_calc - subtotal_calc, 2)
+
+        if not comprobante:
+            # Crear comprobante en el momento (ventas antiguas sin registro).
+            # Por defecto se emite boleta; la factura solo la genera el flujo
+            # de cobro, que recibe el RUC del cliente.
+            tipo_comp_db = 'boleta'
+            num_comp = _siguiente_numero_comprobante(cursor, tipo_comp_db)
+            cursor.execute("""
+                INSERT INTO comprobante
+                    (id_venta, id_tipo_comprobante, numero, ruc, serie, subtotal, igv, total)
+                VALUES (%s, (SELECT id_tipo_comprobante FROM tipo_comprobante WHERE nombre = %s),
+                        %s, NULL, %s, %s, %s, %s)
+                RETURNING *
+            """, (id_venta, tipo_comp_db, num_comp,
+                  'B001', subtotal_calc, igv_calc, total_calc))
+            comprobante = cursor.fetchone()
+            comprobante['tipo'] = tipo_comp_db
+            conn.commit()
+        elif comprobante.get('total') is None:
+            # Registro viejo sin totales: completarlos con lo calculado.
+            cursor.execute("""
+                UPDATE comprobante SET subtotal = %s, igv = %s, total = %s
+                WHERE id_comprobante = %s
+            """, (subtotal_calc, igv_calc, total_calc, comprobante['id_comprobante']))
+            conn.commit()
+            comprobante.update(subtotal=subtotal_calc, igv=igv_calc, total=total_calc)
+    except Exception:
+        conn.rollback()
+        app.logger.exception("Error en comprobante_venta %s", id_venta)
+        flash('No se pudo cargar el comprobante de la venta.', 'danger')
+        return redirect(url_for('pedido_detalle', id=id_venta))
+    finally:
+        conn.close()
+
+    # Datos en la BD Auth: cliente (DNI/nombre) y vendedor (solo lectura).
+    cliente_doc = cliente_nombre = vendedor = None
+    try:
+        conn_a   = get_connection_auth()
+        cursor_a = conn_a.cursor(dictionary=True)
+        if venta.get('id_cliente'):
+            cursor_a.execute(
+                "SELECT nombre, apellido, nro_documento FROM cliente WHERE id_cliente = %s",
+                (venta['id_cliente'],))
+            cli = cursor_a.fetchone() or {}
+            cliente_doc    = (cli.get('nro_documento') or '').strip() or None
+            cliente_nombre = (f"{cli.get('nombre') or ''} {cli.get('apellido') or ''}").strip() or None
+        if venta.get('id_usuario_vendedor'):
+            cursor_a.execute(
+                "SELECT nombres FROM usuario WHERE id_usuario = %s",
+                (venta['id_usuario_vendedor'],))
+            usr = cursor_a.fetchone()
+            vendedor = usr['nombres'] if usr else None
+        conn_a.close()
+    except Exception:
+        app.logger.exception("Error consultando datos de Auth para el comprobante %s", id_venta)
+
+    tipo = (comprobante.get('tipo') or 'boleta').lower()
+    # serie-numero legible: p. ej. serie 'B001' + numero 'B000046' -> 'B001-000046'
+    serie  = comprobante.get('serie') or ('F001' if tipo == 'factura' else 'B001')
+    numero = comprobante.get('numero') or ''
+    dig    = numero[-6:] if numero else '000000'
+    serie_numero = f'{serie}-{dig}'
+
+    # RUC del cliente: en facturas viene en comprobante.ruc; en boletas se
+    # muestra el DNI del cliente si existe (si no, "CLIENTES VARIOS").
+    total       = round(float(comprobante.get('total') or 0), 2)
+    subtotal    = round(float(comprobante.get('subtotal') or 0), 2)
+    igv         = round(float(comprobante.get('igv') or 0), 2)
+    total_letras = numero_a_letras(total)
+
+    # Contenido del QR: resumen del comprobante (formato estilo SUNAT simulado)
+    qr_texto = ('20605977074|{}|{}|{}|{:.2f}|{:.2f}|{}'
+                .format('03' if tipo == 'boleta' else '01', serie, dig,
+                        igv, total, comprobante.get('fecha_emision') or ''))
+    qr_data = _qr_data_uri(qr_texto)
+
+    return render_template('comprobante/comprobante_venta.html',
+                           venta=venta, comprobante=comprobante, items=items,
+                           cliente_doc=cliente_doc, cliente_nombre=cliente_nombre,
+                           vendedor=vendedor, metodo_pago=metodo_pago,
+                           subtotal=subtotal, igv=igv, total=total,
+                           total_letras=total_letras, serie_numero=serie_numero,
+                           qr_data=qr_data, formato=formato)
+
 
 @app.route('/reportes')
 @login_required
@@ -1762,71 +2275,40 @@ def carrito():
 @app.route('/carrito/agregar', methods=['POST'])
 @login_required
 def carrito_agregar():
-    data        = request.get_json()
+    """Valida un producto contra la BD antes de agregarlo al carrito.
+
+    Fuente única de verdad del carrito: localStorage del navegador.
+    Este endpoint ya NO guarda nada en sesión; solo verifica que el
+    producto exista, esté activo y con stock, y devuelve nombre/precio
+    oficiales de la BD para que el frontend corrija datos obsoletos.
+    """
+    data        = request.get_json(silent=True) or {}
     id_producto = int(data.get('id_producto', 0))
     cantidad    = int(data.get('cantidad', 1))
-    carrito     = session.get('carrito', {})
-    key         = str(id_producto)
-    if key in carrito:
-        carrito[key]['cantidad'] += cantidad
-    else:
-        conn   = get_connection_tienda()
-        cursor = conn.cursor(dictionary=True)
-        cursor.execute("SELECT nombre, precio FROM producto WHERE id_producto=%s", (id_producto,))
-        prod = cursor.fetchone()
-        conn.close()
-        if prod:
-            carrito[key] = {
-                'id_producto': id_producto,
-                'nombre':      prod['nombre'],
-                'precio':      float(prod['precio']),
-                'cantidad':    cantidad
-            }
-    session['carrito'] = carrito
-    return {'ok': True, 'items': len(carrito)}
 
+    conn   = get_connection_tienda()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute(
+        "SELECT nombre, precio, stock FROM producto WHERE id_producto=%s AND activo = TRUE",
+        (id_producto,))
+    prod = cursor.fetchone()
+    conn.close()
 
-@app.route('/procesar_pago', methods=['POST'])
-@login_required
-def procesar_pago():
-    # Simulación de pago: si hay items en session['ultimo_pedido'] o en session['carrito'], crear pedido si cliente
-    if session.get('rol') != 'cliente':
-        flash("Solo clientes pueden procesar pagos.", "warning")
-        return redirect(url_for('productos'))
+    if not prod:
+        return {'ok': False,
+                'error': 'Este producto ya no está disponible. Se quitará del carrito.'}
+    if prod['stock'] is not None and int(prod['stock']) < 1:
+        return {'ok': False,
+                'error': f"'{prod['nombre']}' está agotado. Se quitará del carrito."}
+    if int(prod['stock']) < cantidad:
+        return {'ok': False,
+                'error': f"Stock insuficiente de '{prod['nombre']}': quedan {prod['stock']}."}
 
-    # Preferir items del body si llegan (compatibilidad con pago.html)
-    items = session.get('ultimo_pedido') or []
-    if not items:
-        # intentar obtener desde session carrito dict -> transformar a lista
-        carrito = session.get('carrito', {})
-        items = []
-        for k, v in carrito.items():
-            items.append({
-                'id_producto': v.get('id_producto') or v.get('id'),
-                'cantidad': v.get('cantidad'),
-                'precio': v.get('precio')
-            })
-
-    if not items:
-        flash("No hay items en el carrito para procesar.", "warning")
-        return redirect(url_for('catalogo_cliente'))
-
-    # Reusar la lógica de carrito_confirmar_v2 para crear pedido (llamar internamente)
-    resp = carrito_confirmar_v2()  # devuelve dict o respuesta
-    # carrito_confirmar_v2 ya hizo commit y flash
-    # redirigir al cliente a catálogo o a detalle del pedido si id devuelto
-    if isinstance(resp, dict) and resp.get('ok') and resp.get('id_pedido'):
-        return redirect(url_for('catalogo_cliente'))
-    # si fue Response (JS fetch), intentar interpretar
-    try:
-        # si retornó flask Response con JSON
-        d = resp.get_json() if hasattr(resp, 'get_json') else {}
-        if d.get('ok') and d.get('id_pedido'):
-            return redirect(url_for('catalogo_cliente'))
-    except Exception:
-        pass
-    # fallback
-    return redirect(url_for('catalogo_cliente'))
+    return {'ok': True,
+            'id_producto': id_producto,
+            'nombre':  prod['nombre'],
+            'precio':  float(prod['precio']),
+            'stock':   int(prod['stock'])}
 
 
 # ── Cambiar clave ─────────────────────────────────────────────
@@ -1896,12 +2378,17 @@ def registro_cliente():
     apellido   = request.form.get('apellido', '').strip()
     correo     = _normalizar_correo(request.form.get('correo'))
     telefono   = request.form.get('telefono', '').strip()
+    direccion  = request.form.get('direccion', '').strip()
     contrasena = request.form.get('contrasena', '')
     confirmar  = request.form.get('confirmar', '')
 
     if not nombre or not correo or not contrasena:
         return render_template('login_cliente.html',
                                error='Nombre, correo y contrasena son obligatorios.',
+                               registro_activo=True)
+    if len(direccion) < 5:
+        return render_template('login_cliente.html',
+                               error='La dirección es obligatoria para registrarte (mínimo 5 caracteres).',
                                registro_activo=True)
     if contrasena != confirmar:
         return render_template('login_cliente.html',
@@ -1952,20 +2439,20 @@ def registro_cliente():
             # sin contrasena: se reutiliza la fila y se vuelve a verificar.
             id_cliente = existente['id_cliente']
             cursor.execute("""
-                UPDATE cliente
-                   SET nombre = %s, apellido = %s, telefono = %s,
-                       contrasena = %s, email = %s, activo = FALSE
-                 WHERE id_cliente = %s
-            """, (nombre, apellido or None, telefono or None, hash_pw, correo, id_cliente))
+                UPDATE cliente SET nombre=%s, apellido=%s, telefono=%s, contrasena=%s, direccion=%s
+                WHERE id_cliente=%s
+            """, (nombre, apellido, telefono or None, hash_pw, direccion, id_cliente))
         else:
-            # id_tipo_documento=1 (DNI) y nro_documento vacio por defecto:
-            # el formulario web aun no pide documento.
+            # id_tipo_documento=1 (DNI) y nro_documento NULL por defecto;
+            # el formulario web no pide documento todavía.
+            # OJO: no usar '' — la BD tiene UNIQUE (id_tipo_documento, nro_documento)
+            # y un segundo registro con '' violaría la restricción. NULL no choca.
             cursor.execute("""
                 INSERT INTO cliente (nombre, apellido, email, telefono, contrasena,
-                                     id_tipo_documento, nro_documento, activo)
-                VALUES (%s, %s, %s, %s, %s, 1, '', FALSE)
+                                     id_tipo_documento, nro_documento, direccion, activo)
+                VALUES (%s, %s, %s, %s, %s, 1, NULL, %s, FALSE)
                 RETURNING id_cliente
-            """, (nombre, apellido or None, correo, telefono or None, hash_pw))
+            """, (nombre, apellido, correo, telefono or None, hash_pw, direccion))
             id_cliente = cursor.fetchone()['id_cliente']
 
         # Invalidar codigos anteriores y guardar el nuevo (solo el hash)
@@ -1980,7 +2467,7 @@ def registro_cliente():
         conn.commit()
     except Exception as e:
         conn.rollback()
-        app.logger.exception(f"Error en registro_cliente ({correo}): {e}")
+        app.logger.exception("Error en registro_cliente")
         return render_template('login_cliente.html',
                                error='No se pudo iniciar el registro. Intenta de nuevo.',
                                registro_activo=True)
@@ -2004,9 +2491,13 @@ def registro_cliente():
                                registro_activo=True)
     if resultado == 'smtp_auth':
         return render_template('login_cliente.html',
-                               error=('Error de autenticacion del correo del sistema. '
-                                      'Contacta al administrador.'),
-                               registro_activo=True)
+                               verificar_activo=True,
+                               correo_verificar=correo,
+                               codigo_visible=codigo,
+                               aviso_smtp=True,
+                               aviso_smtp_motivo=(
+                                   'Credenciales SMTP inválidas (revisa SMTP_USER/SMTP_PASS '
+                                   'usando una contraseña de aplicación de Gmail).'))
     if resultado == 'smtp_conexion':
         return render_template('login_cliente.html',
                                error=('No se pudo conectar con el servidor de correo. '
@@ -2196,7 +2687,11 @@ def recuperar_contrasena():
                                       'Avisa al administrador (falta SMTP_USER/SMTP_PASS).'))
     if resultado == 'smtp_auth':
         return render_template('recuperar_contrasena.html',
-                               error='Error de autenticación con el correo. Contacta al administrador.')
+                               verificar_activo=True, correo_verificar=correo,
+                               codigo_visible=codigo, aviso_smtp=True,
+                               aviso_smtp_motivo=(
+                                   'Credenciales SMTP inválidas (revisa SMTP_USER/SMTP_PASS '
+                                   'usando una contraseña de aplicación de Gmail).'))
     if resultado == 'smtp_conexion':
         return render_template('recuperar_contrasena.html',
                                error='No se pudo conectar con el servidor de correo. Intenta de nuevo.')
@@ -2320,8 +2815,13 @@ def mis_pedidos():
     conn   = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
     pedidos_lista = []
-    PASOS = ['pendiente', 'procesando', 'enviado', 'entregado']
+    fases_orden = []
     try:
+        # Fases válidas leídas de la BD (misma fuente que el panel admin)
+        cursor.execute("SELECT nombre FROM estado_venta WHERE activo = TRUE ORDER BY orden")
+        fases_orden = [r['nombre'] for r in cursor.fetchall()]
+        fases_orden = [f for f in fases_orden if f != 'cancelado']
+        PASOS = fases_orden
         cursor.execute("""
             SELECT v.id_venta,
                    v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima' AS fecha,
@@ -2353,7 +2853,9 @@ def mis_pedidos():
         app.logger.exception("Error mis_pedidos: %s", e)
     finally:
         conn.close()
-    return render_template('mis_pedidos.html', pedidos=pedidos_lista)
+    if not fases_orden:
+        fases_orden = ['pendiente', 'procesando', 'enviado', 'entregado']
+    return render_template('mis_pedidos.html', pedidos=pedidos_lista, fases_orden=fases_orden)
 
 
 @app.route('/pedido_aceptado')
@@ -2377,7 +2879,7 @@ def pedido_aceptado():
             if row:
                 estado = row.get('estado', 'pendiente')
         except Exception:
-            pass
+            app.logger.exception("Error consultando estado del pedido id=%s", id_pedido)
         finally:
             conn.close()
     return render_template('pedido_aceptado.html', id_pedido=id_pedido, estado=estado)
@@ -2387,14 +2889,22 @@ def pedido_aceptado():
 @login_required
 @escritura_required
 def pedido_cambiar_estado(id):
-    """Vendedor/Admin cambia el estado (fase) de un pedido."""
+    """Vendedor/Admin cambia el estado (fase) de un pedido.
+    Responde JSON si la petición es AJAX (X-Requested-With), o redirige
+    si llega desde un formulario clásico. (Integrado desde origin/Lesly.)
+    """
     conn_v   = get_connection_tienda()
     cursor_v = conn_v.cursor(dictionary=True)
     cursor_v.execute("SELECT nombre FROM estado_venta WHERE activo = TRUE ORDER BY orden")
     estados_validos = tuple(r['nombre'] for r in cursor_v.fetchall())
     conn_v.close()
-    nuevo_estado = request.form.get('estado', 'pendiente')
+
+    nuevo_estado = (request.form.get('estado') or '').strip()
+    is_ajax = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
+
     if nuevo_estado not in estados_validos:
+        if is_ajax:
+            return {'ok': False, 'error': f'Estado "{nuevo_estado}" no es válido.'}, 400
         flash('Estado no válido.', 'danger')
         return redirect(url_for('pedido_detalle', id=id))
     conn   = get_connection_tienda()
@@ -2406,10 +2916,16 @@ def pedido_cambiar_estado(id):
             WHERE id_venta = %s
         """, (nuevo_estado, id))
         conn.commit()
+        if is_ajax:
+            return {'ok': True, 'estado': nuevo_estado,
+                    'mensaje': f'Estado actualizado a "{nuevo_estado}".'}
         flash(f'Estado actualizado a "{nuevo_estado}".', 'success')
-    except Exception as e:
+    except Exception:
         conn.rollback()
-        flash(f'Error al actualizar estado: {e}', 'danger')
+        app.logger.exception("Error al actualizar estado del pedido %s", id)
+        if is_ajax:
+            return {'ok': False, 'error': 'No se pudo actualizar el estado. Intenta de nuevo.'}, 500
+        flash('Error al actualizar el estado. Intenta de nuevo.', 'danger')
     finally:
         conn.close()
     # Volver a la lista si el cambio vino desde /pedidos, sino al detalle
@@ -2417,6 +2933,100 @@ def pedido_cambiar_estado(id):
     if '/pedidos?' in ref or ref.rstrip('/').endswith('/pedidos'):
         return redirect(url_for('pedidos'))
     return redirect(url_for('pedido_detalle', id=id))
+
+
+# ── Helpers del comprobante de venta (simulación boleta/factura) ─────────────
+
+_UNIDADES = ['', 'UNO', 'DOS', 'TRES', 'CUATRO', 'CINCO', 'SEIS', 'SIETE',
+             'OCHO', 'NUEVE', 'DIEZ', 'ONCE', 'DOCE', 'TRECE', 'CATORCE',
+             'QUINCE', 'DIECISÉIS', 'DIECISIETE', 'DIECIOCHO', 'DIECINUEVE', 'VEINTE']
+_DECENAS  = ['', '', 'VEINTI', 'TREINTA', 'CUARENTA', 'CINCUENTA', 'SESENTA',
+             'SETENTA', 'OCHENTA', 'NOVENTA']
+_CENTENAS = ['', 'CIENTO', 'DOSCIENTOS', 'TRESCIENTOS', 'CUATROCIENTOS',
+             'QUINIENTOS', 'SEISCIENTOS', 'SETECIENTOS', 'OCHOCIENTOS', 'NOVECIENTOS']
+
+
+def _tres_digitos_a_letras(n):
+    """Convierte un número 0-999 a letras en español."""
+    if n == 0:
+        return ''
+    if n == 100:
+        return 'CIEN'
+    c, resto = divmod(n, 100)
+    partes = [_CENTENAS[c]] if c else []
+    if resto:
+        if resto <= 20:
+            partes.append(_UNIDADES[resto])
+        else:
+            d, u = divmod(resto, 10)
+            if d == 2 and u:
+                partes.append('VEINTI' + _UNIDADES[u])
+            else:
+                partes.append(_DECENAS[d] + (' Y ' + _UNIDADES[u] if u else ''))
+    return ' '.join(p for p in partes if p)
+
+
+def numero_a_letras(monto):
+    """Devuelve el monto en letras estilo peruano:
+    189.90 -> 'CIENTO OCHENTA Y NUEVE CON 90/100 SOLES'."""
+    try:
+        monto = float(monto or 0)
+    except (TypeError, ValueError):
+        monto = 0.0
+    entero  = int(monto)
+    decimos = int(round((monto - entero) * 100))
+    if decimos == 100:          # redondeo borde (p. ej. 0.999)
+        entero, decimos = entero + 1, 0
+    if entero == 0:
+        letras = 'CERO'
+    else:
+        grupos = []
+        millones, resto = divmod(entero, 1000000)
+        miles, unidades = divmod(resto, 1000)
+        if millones:
+            txt = _tres_digitos_a_letras(millones)
+            grupos.append('UN MILLÓN' if millones == 1 else f'{txt} MILLONES')
+        if miles:
+            txt = _tres_digitos_a_letras(miles)
+            grupos.append('MIL' if miles == 1 else f'{txt} MIL')
+        if unidades:
+            grupos.append(_tres_digitos_a_letras(unidades))
+        letras = ' '.join(grupos)
+    return f'{letras} CON {decimos:02d}/100 SOLES'
+
+
+def _qr_data_uri(texto):
+    """Genera un QR PNG (data URI base64) con el texto dado.
+    Devuelve None si la librería qrcode no está disponible (la plantilla
+    muestra un placeholder en ese caso)."""
+    try:
+        import io, base64, qrcode
+        # Factoría SVG: no requiere Pillow y se imprime nítida a cualquier tamaño.
+        from qrcode.image.svg import SvgImage
+        img = qrcode.make(texto, image_factory=SvgImage, box_size=6, border=1)
+        buf = io.BytesIO()
+        img.save(buf)
+        return 'data:image/svg+xml;base64,' + base64.b64encode(buf.getvalue()).decode()
+    except Exception:
+        app.logger.exception("No se pudo generar el QR del comprobante")
+        return None
+
+
+def _siguiente_numero_comprobante(cursor, tipo_comp):
+    """Devuelve el siguiente número de comprobante correlativo por tipo.
+
+    Serie: 'B' + 6 dígitos para boleta, 'F' + 6 dígitos para factura
+    (p. ej. B000123). Se calcula dentro de la misma transacción de la venta
+    a partir del máximo existente, garantizando unicidad y correlatividad.
+    """
+    serie = 'F' if tipo_comp == 'factura' else 'B'
+    cursor.execute("""
+        SELECT COALESCE(MAX(CAST(SUBSTRING(numero FROM '^[BF](\\d+)') AS INTEGER)), 0) + 1 AS seq
+        FROM comprobante WHERE numero LIKE %s
+    """, (serie + '%',))
+    row = cursor.fetchone()
+    seq = row['seq'] if isinstance(row, dict) else row[0]
+    return f"{serie}{seq:06d}"
 
 
 @app.route('/carrito/confirmar_v2', methods=['POST'])
@@ -2436,29 +3046,51 @@ def carrito_confirmar_v2():
     if session.get('rol') != 'cliente':
         return {'ok': False, 'error': 'Solo clientes pueden confirmar pedidos'}
 
-    # Validar que todos los productos del carrito existan y estén activos
-    # (el carrito vive en localStorage del navegador y puede traer IDs obsoletos
-    #  si el catálogo cambió desde que se agregaron los ítems)
+    # Validar el carrito contra la BD: existencia, estado activo, stock y
+    # precio oficial. El carrito vive en localStorage (fuente única de verdad
+    # en el frontend) y puede traer IDs/precios obsoletos; aquí se corrige.
     conn_val   = get_connection_tienda()
     cursor_val = conn_val.cursor(dictionary=True)
     ids_items  = {int(it.get('id_producto') or it.get('id') or 0) for it in items}
     cursor_val.execute(
-        "SELECT id_producto FROM producto WHERE id_producto = ANY(%s) AND activo = TRUE",
+        "SELECT id_producto, nombre, precio, stock FROM producto "
+        "WHERE id_producto = ANY(%s) AND activo = TRUE",
         (list(ids_items),))
-    ids_validos = {r['id_producto'] for r in cursor_val.fetchall()}
+    prod_db = {r['id_producto']: r for r in cursor_val.fetchall()}
     conn_val.close()
 
-    ids_faltantes = ids_items - ids_validos
-    if ids_faltantes:
-        nombres_bad = []
-        for it in items:
-            pid = int(it.get('id_producto') or it.get('id') or 0)
-            if pid in ids_faltantes:
-                nombres_bad.append(it.get('nombre') or f'producto #{pid}')
-        return {'ok': False, 'error': (
-            'Este producto ya no está disponible: ' + ', '.join(nombres_bad)
-            + '. Eliminalo del carrito para continuar.'
-        )}
+    # Ítems que ya no existen o fueron desactivados: se EXCLUYEN del pedido
+    # y se reportan explícitamente al usuario (nunca fallo silencioso).
+    excluidos = []
+    items_ok  = []
+    for it in items:
+        pid  = int(it.get('id_producto') or it.get('id') or 0)
+        prod = prod_db.get(pid)
+        if not prod:
+            excluidos.append({'id_producto': pid,
+                              'nombre': it.get('nombre') or f'producto #{pid}',
+                              'motivo': 'Ya no está disponible (eliminado o desactivado)'})
+            continue
+        cantidad = max(1, int(it.get('cantidad', 1)))
+        stock_db = int(prod['stock'] or 0)
+        if stock_db < 1:
+            excluidos.append({'id_producto': pid, 'nombre': prod['nombre'],
+                              'motivo': 'Sin stock disponible'})
+            continue
+        if cantidad > stock_db:
+            excluidos.append({'id_producto': pid, 'nombre': prod['nombre'],
+                              'motivo': f'Stock insuficiente (quedan {stock_db})'})
+            continue
+        # Precio y nombre oficiales de la BD (ignora los enviados por el cliente)
+        items_ok.append({'id_producto': pid,
+                         'nombre':      prod['nombre'],
+                         'cantidad':    cantidad,
+                         'precio':      float(prod['precio'])})
+
+    if not items_ok:
+        return {'ok': False,
+                'error': 'Ningún producto del carrito está disponible.',
+                'excluidos': excluidos}
 
     tipo_boleta  = 'electronica' if tipo_comprobante == 'boleta_electronica' else 'simple'
     tipo_comp_db = 'factura' if (ruc and len(ruc) == 11 and ruc.startswith('20')) else 'boleta'
@@ -2489,41 +3121,110 @@ def carrito_confirmar_v2():
                 VALUES (%s, (SELECT id_tipo_pago FROM tipo_pago WHERE nombre = %s), %s, 'pendiente')
             """, (id_venta, metodo_db, id_caja_a))
         except Exception:
-            pass  # tabla/columna de pago opcional; no bloquea el pedido
+            conn.rollback()
+            app.logger.exception("Error al insertar pago del pedido id_venta=%s", id_venta)
+            return {'ok': False,
+                    'error': 'No se pudo registrar el pago. El pedido no se creó. Intenta de nuevo.'}, 500
 
-        for it in items:
-            id_producto = int(it.get('id_producto') or it.get('id') or 0)
-            cantidad    = int(it.get('cantidad', 1))
-            precio_unit = float(it.get('precio', 0) or 0)
+        for it in items_ok:
+            id_producto = it['id_producto']
+            cantidad    = it['cantidad']
+            precio_unit = it['precio']  # precio oficial de la BD, no del cliente
             cursor.execute("""
                 INSERT INTO detalle_venta (id_venta, id_producto, cantidad, precio_unitario)
                 VALUES (%s, %s, %s, %s)
             """, (id_venta, id_producto, cantidad, precio_unit))
             cursor.execute("""
                 UPDATE producto SET stock = GREATEST(stock - %s, 0) WHERE id_producto = %s
+                RETURNING stock
             """, (cantidad, id_producto))
+            nuevo_stock = cursor.fetchone()[0]
+            cursor.execute("""
+                INSERT INTO inventario_movimiento
+                    (tipo, id_producto, id_proveedor, cantidad, precio_unitario,
+                     observacion, id_usuario, stock_resultante)
+                VALUES ('salida', %s, NULL, %s, %s, %s, NULL, %s)
+            """, (id_producto, cantidad, precio_unit,
+                  f'Venta online #{id_venta} (cliente #{session["usuario_id"]})',
+                  nuevo_stock))
 
-        # Generar número de comprobante y guardarlo
-        num_comp = 'B' + str(id_venta).zfill(6) + '-' + ''.join(random.choices(string.digits, k=4))
+        # Generar número de comprobante correlativo por tipo (B000001 / F000001)
+        # dentro de la misma transacción: si falla, toda la venta se revierte.
+        num_comp = _siguiente_numero_comprobante(cursor, tipo_comp_db)
         try:
             cursor.execute("""
-                INSERT INTO comprobante (id_venta, id_tipo_comprobante, numero, ruc)
-                VALUES (%s, (SELECT id_tipo_comprobante FROM tipo_comprobante WHERE nombre = %s), %s, %s)
-            """, (id_venta, tipo_comp_db, num_comp, ruc))
+                INSERT INTO comprobante (id_venta, id_tipo_comprobante, numero, ruc, serie)
+                VALUES (%s, (SELECT id_tipo_comprobante FROM tipo_comprobante WHERE nombre = %s), %s, %s, %s)
+            """, (id_venta, tipo_comp_db, num_comp, ruc,
+                  'F001' if tipo_comp_db == 'factura' else 'B001'))
         except Exception:
-            pass  # tabla comprobante puede no existir; no es crítico
+            conn.rollback()
+            app.logger.exception("Error al insertar comprobante del pedido id_venta=%s", id_venta)
+            return {'ok': False,
+                    'error': 'No se pudo generar el comprobante. El pedido no se creó. Intenta de nuevo.'}, 500
 
         conn.commit()
-        session['carrito'] = {}
-        session['ultimo_pedido'] = items
-        return {'ok': True, 'id_pedido': id_venta}
+        session['ultimo_pedido'] = items_ok
+        return {'ok': True, 'id_pedido': id_venta, 'excluidos': excluidos}
 
-    except Exception as e:
+    except Exception:
         conn.rollback()
-        app.logger.exception("Error carrito_confirmar_v2: %s", e)
-        return {'ok': False, 'error': str(e)}
+        app.logger.exception("Error carrito_confirmar_v2")
+        return {'ok': False, 'error': 'No se pudo confirmar el pedido. Intenta de nuevo más tarde.'}, 500
     finally:
         conn.close()
+
+
+# ── Consultas RUC/DNI (proxy seguro hacia la API Perú; placeholder de la futura API SUNAT) ──
+# El token NUNCA se expone al cliente: se lee únicamente del entorno del servidor.
+import json as _json
+import urllib.request as _urllib_request
+import urllib.error as _urllib_error
+
+SUNAT_API_BASE  = os.environ.get("BASE_SUNAT", "https://dniruc.apisperu.com/api/v1")
+SUNAT_API_TOKEN = os.environ.get("TOKEN_SUNAT")  # sin valor por defecto: jamás hardcodeado
+
+def _consultar_api_sunat(tipo, numero):
+    """Consulta la API Perú (simulación de SUNAT) desde el servidor y devuelve (data, status, error)."""
+    if not SUNAT_API_TOKEN:
+        return None, 503, "Servicio no configurado: falta TOKEN_SUNAT en el entorno del servidor."
+    url = f"{SUNAT_API_BASE}/{tipo}/{numero}?token={SUNAT_API_TOKEN}"
+    req = _urllib_request.Request(url, headers={"Accept": "application/json"})
+    try:
+        with _urllib_request.urlopen(req, timeout=10) as resp:
+            data = _json.loads(resp.read().decode("utf-8"))
+            return data, 200, None
+    except _urllib_error.HTTPError as e:
+        try:
+            data = _json.loads(e.read().decode("utf-8"))
+        except Exception:
+            data = None
+        return data, e.code, f"Error de la API externa ({e.code})"
+    except Exception as e:
+        app.logger.exception("Error consultando API RUC/DNI: %s", e)
+        return None, 502, "No se pudo conectar al servicio de consulta."
+
+@app.route('/api/consultar_ruc/<ruc>')
+def api_consultar_ruc(ruc):
+    if not (ruc.isdigit() and len(ruc) == 11):
+        return {'ok': False, 'error': 'RUC inválido: debe tener 11 dígitos.'}, 400
+    data, status, err = _consultar_api_sunat('ruc', ruc)
+    if err and data is None:
+        return {'ok': False, 'error': err}, status
+    resp = dict(data) if isinstance(data, dict) else {}
+    resp['ok'] = bool(resp.get('razonSocial') or resp.get('razon_social') or resp.get('nombre'))
+    return resp, 200 if resp['ok'] else status
+
+@app.route('/api/consultar_dni/<dni>')
+def api_consultar_dni(dni):
+    if not (dni.isdigit() and len(dni) == 8):
+        return {'ok': False, 'error': 'DNI inválido: debe tener 8 dígitos.'}, 400
+    data, status, err = _consultar_api_sunat('dni', dni)
+    if err and data is None:
+        return {'ok': False, 'error': err}, status
+    resp = dict(data) if isinstance(data, dict) else {}
+    resp['ok'] = bool(resp.get('nombres') or resp.get('nombre') or resp.get('apellidoPaterno') or resp.get('apellido_paterno'))
+    return resp, 200 if resp['ok'] else status
 
 
 if __name__ == '__main__':
