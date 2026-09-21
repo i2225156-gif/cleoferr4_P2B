@@ -1682,11 +1682,55 @@ def caja_abrir():
     return redirect(url_for('caja'))
 
 
+@app.route('/caja/egreso', methods=['POST'])
+@login_required
+@escritura_required
+def caja_egreso():
+    """Registra un EGRESO (gasto/salida de efectivo) de la caja abierta.
+    Descuenta del efectivo esperado del cierre. (Integrado desde origin/Lesly.)"""
+    concepto = request.form.get('concepto', '').strip()
+    try:
+        monto = float(request.form.get('monto', '0') or 0)
+    except ValueError:
+        monto = -1
+    if not concepto:
+        flash('El concepto del egreso es obligatorio.', 'danger')
+        return redirect(url_for('caja'))
+    if monto <= 0:
+        flash('El monto del egreso debe ser mayor que cero.', 'danger')
+        return redirect(url_for('caja'))
+
+    conn   = get_connection_tienda()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT id_caja FROM caja WHERE estado = 'abierta' LIMIT 1")
+        caja = cursor.fetchone()
+        if not caja:
+            flash('No hay ninguna caja abierta. Abre la caja para registrar egresos.', 'danger')
+            return redirect(url_for('caja'))
+
+        cursor.execute("""
+            INSERT INTO movimiento_caja (id_caja, tipo, monto, concepto, id_usuario)
+            VALUES (%s, 'egreso', %s, %s, %s)
+        """, (caja['id_caja'], monto, concepto, session.get('usuario_id')))
+        conn.commit()
+        flash(f'Egreso registrado en la caja #{caja["id_caja"]}: {concepto} por S/ {monto:.2f}.', 'success')
+    except Exception:
+        conn.rollback()
+        app.logger.exception("Error registrando egreso de caja")
+        flash('No se pudo registrar el egreso.', 'danger')
+    finally:
+        conn.close()
+    return redirect(url_for('caja'))
+
+
 @app.route('/caja/cerrar', methods=['POST'])
 @login_required
 @escritura_required
 def caja_cerrar():
-    """Cierra la caja abierta: calcula el esperado y registra la diferencia."""
+    """Cierra la caja abierta: calcula el EFECTIVO esperado
+    (fondo + ventas en efectivo − egresos) y registra la diferencia.
+    (Separación efectivo/digital integrada desde origin/Lesly.)"""
     try:
         declarado = float(request.form.get('monto_declarado', '0') or 0)
     except ValueError:
@@ -1703,15 +1747,48 @@ def caja_cerrar():
             flash('No hay ninguna caja abierta para cerrar.', 'danger')
             return redirect(url_for('caja'))
 
-        cursor.execute("""
-            SELECT COALESCE(SUM(CASE WHEN tipo = 'ingreso' THEN monto ELSE -monto END), 0) AS sistema
-            FROM movimiento_caja WHERE id_caja = %s
-        """, (caja['id_caja'],))
-        sistema = float(cursor.fetchone()['sistema'])
-        diferencia = declarado - sistema
+        id_caja = caja['id_caja']
+        fondo   = float(caja.get('monto_apertura') or 0)
 
-        # El cierre se refleja solo en la fila de caja (sin movimiento_caja 'cierre');
-        # los montos quedan en la propia caja y sus movimientos del turno.
+        # Ventas LOCALES pagadas en EFECTIVO (el único dinero físico que entra)
+        cursor.execute("""
+            SELECT COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS total
+            FROM pago p
+            JOIN venta v       ON v.id_venta = p.id_venta
+            JOIN tipo_venta tv ON v.id_tipo_venta = tv.id_tipo_venta
+            JOIN tipo_pago tp  ON p.id_tipo_pago = tp.id_tipo_pago
+            LEFT JOIN detalle_venta d ON d.id_venta = v.id_venta
+            WHERE tv.nombre = 'local' AND p.estado = 'confirmado'
+              AND p.id_caja = %s AND tp.nombre = 'efectivo'
+        """, (id_caja,))
+        ventas_efectivo = float(cursor.fetchone()['total'] or 0)
+
+        # Egresos del turno (descuentan del efectivo esperado)
+        cursor.execute("""
+            SELECT COALESCE(SUM(monto), 0) AS total
+            FROM movimiento_caja WHERE id_caja = %s AND tipo = 'egreso'
+        """, (id_caja,))
+        egresos = float(cursor.fetchone()['total'] or 0)
+
+        esperado = fondo + ventas_efectivo - egresos
+        diferencia = declarado - esperado
+
+        # Pagos DIGITALES del turno (resumen informativo; NO afectan el efectivo)
+        cursor.execute("""
+            SELECT tp.nombre AS metodo, COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS total
+            FROM pago p
+            JOIN venta v       ON v.id_venta = p.id_venta
+            JOIN tipo_venta tv ON v.id_tipo_venta = tv.id_tipo_venta
+            JOIN tipo_pago tp  ON p.id_tipo_pago = tp.id_tipo_pago
+            LEFT JOIN detalle_venta d ON d.id_venta = v.id_venta
+            WHERE tv.nombre = 'local' AND p.estado = 'confirmado'
+              AND p.id_caja = %s AND tp.nombre IN ('yape_plin', 'tarjeta')
+            GROUP BY tp.nombre
+        """, (id_caja,))
+        digital = {r['metodo']: float(r['total'] or 0) for r in cursor.fetchall()}
+        yape, tarjeta = digital.get('yape_plin', 0.0), digital.get('tarjeta', 0.0)
+
+        # El cierre se refleja solo en la fila de caja (sin movimiento_caja 'cierre')
         cursor.execute("""
             UPDATE caja
             SET estado = 'cerrada',
@@ -1722,17 +1799,24 @@ def caja_cerrar():
                 diferencia = %s,
                 observaciones = %s
             WHERE id_caja = %s
-        """, (session.get('usuario_id'), sistema, declarado, diferencia,
-              observaciones, caja['id_caja']))
+        """, (session.get('usuario_id'), esperado, declarado, diferencia,
+              observaciones, id_caja))
         conn.commit()
 
+        mensaje = (
+            f'Caja #{id_caja} cerrada. EFECTIVO: fondo S/ {fondo:.2f} + ventas '
+            f'efectivo S/ {ventas_efectivo:.2f} − egresos S/ {egresos:.2f} '
+            f'= esperado S/ {esperado:.2f} | '
+            f'PAGOS DIGITALES: Yape/Plin S/ {yape:.2f}, Tarjeta S/ {tarjeta:.2f} | '
+            f'Diferencia: S/ {diferencia:+.2f}.'
+        )
         if abs(diferencia) > UMBRAL_DIFERENCIA_CAJA:
-            flash(f'Caja #{caja["id_caja"]} cerrada. ⚠ Diferencia de S/ {diferencia:+.2f} supera el umbral (S/ {UMBRAL_DIFERENCIA_CAJA:.0f}).', 'warning')
+            flash(mensaje + f' ⚠ La diferencia supera el umbral (S/ {UMBRAL_DIFERENCIA_CAJA:.0f}).', 'warning')
         else:
-            flash(f'Caja #{caja["id_caja"]} cerrada. Diferencia: S/ {diferencia:+.2f}.', 'success')
-    except Exception as e:
+            flash(mensaje, 'success')
+    except Exception:
         conn.rollback()
-        app.logger.exception("Error cerrando caja: %s", e)
+        app.logger.exception("Error cerrando caja")
         flash('No se pudo cerrar la caja.', 'danger')
     finally:
         conn.close()
