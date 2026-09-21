@@ -75,49 +75,90 @@ bcrypt = Bcrypt(app)
 
 
 def enviar_correo(destino, asunto, cuerpo_html, cuerpo_texto=None):
-    """Envía un correo vía Gmail SMTP (STARTTLS, puerto 587).
+    """Envia un correo via Gmail SMTP.
 
-    Usa SMTP_USER / SMTP_PASS del entorno (contraseña de aplicación de Gmail).
+    Intenta primero SSL en el puerto 465 y, si falla la conexion, STARTTLS en
+    el 587 (muchas redes universitarias/ISP bloquean uno de los dos).
+
+    Usa SMTP_USER / SMTP_PASS del entorno. SMTP_PASS debe ser una
+    "contrasena de aplicacion" de Gmail de 16 caracteres, NO la clave normal.
 
     Retorna:
-      - None                  -> envío exitoso
-      - 'smtp_no_configurado' -> faltan SMTP_USER/SMTP_PASS (modo desarrollo)
-      - 'smtp_auth'           -> error de autenticación con Gmail
-      - 'error'               -> cualquier otro fallo de envío
+      - None                  -> envio exitoso
+      - 'smtp_no_configurado' -> faltan SMTP_USER/SMTP_PASS en el .env
+      - 'smtp_auth'           -> Gmail rechazo usuario/contrasena de aplicacion
+      - 'smtp_conexion'       -> no se pudo conectar (red/firewall/puerto)
+      - 'error'               -> cualquier otro fallo de envio
     """
+    import smtplib
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.text import MIMEText
+    from email.utils import formataddr
+
     smtp_user = os.environ.get('SMTP_USER', '').strip()
-    smtp_pass = os.environ.get('SMTP_PASS', '').strip()
-    if not smtp_user or not smtp_pass:
-        app.logger.warning("SMTP no configurado (faltan SMTP_USER/SMTP_PASS en .env).")
+    # Gmail muestra la clave de aplicacion como "abcd efgh ijkl mnop":
+    # quitamos espacios para que el login no falle por un copiado con espacios.
+    smtp_pass = os.environ.get('SMTP_PASS', '').replace(' ', '').strip()
+
+    if not smtp_user or not smtp_pass or smtp_pass.startswith('ROTA_ESTA'):
+        app.logger.error(
+            "SMTP NO CONFIGURADO: define SMTP_USER y SMTP_PASS (contrasena de "
+            "aplicacion de Gmail) en el archivo .env y reinicia la aplicacion."
+        )
         return 'smtp_no_configurado'
-    try:
-        from email.mime.multipart import MIMEMultipart
-        from email.mime.text import MIMEText
-        import smtplib
 
-        msg = MIMEMultipart('alternative')
-        msg['Subject'] = asunto
-        msg['From']    = f'Ferretería CLEOFERR <{smtp_user}>'
-        msg['To']      = destino
-        msg.attach(MIMEText(cuerpo_texto or '', 'plain', 'utf-8'))
-        msg.attach(MIMEText(cuerpo_html, 'html', 'utf-8'))
+    msg = MIMEMultipart('alternative')
+    msg['Subject'] = asunto
+    msg['From'] = formataddr(('Ferreteria CLEOFERR', smtp_user))
+    msg['To'] = destino
+    msg.attach(MIMEText(cuerpo_texto or '', 'plain', 'utf-8'))
+    msg.attach(MIMEText(cuerpo_html, 'html', 'utf-8'))
 
-        server = smtplib.SMTP('smtp.gmail.com', 587, timeout=10)
-        server.ehlo()
-        server.starttls()
-        server.ehlo()
-        server.login(smtp_user, smtp_pass)
-        server.sendmail(smtp_user, [destino], msg.as_string())
-        server.quit()
-        app.logger.info(f"Correo enviado a {destino} (asunto: {asunto})")
-        return None
-    except smtplib.SMTPAuthenticationError:
-        app.logger.error("Gmail SMTP: error de autenticación. "
-                         "Verifica SMTP_USER y SMTP_PASS (usa contraseña de aplicación).")
-        return 'smtp_auth'
-    except Exception as e:
-        app.logger.error(f"Error enviando correo a {destino}: {e}")
-        return 'error'
+    ultimo_error = None
+    for modo, puerto in (('ssl', 465), ('starttls', 587)):
+        server = None
+        try:
+            if modo == 'ssl':
+                import ssl
+                server = smtplib.SMTP_SSL('smtp.gmail.com', puerto, timeout=15,
+                                          context=ssl.create_default_context())
+            else:
+                server = smtplib.SMTP('smtp.gmail.com', puerto, timeout=15)
+                server.ehlo()
+                server.starttls()
+                server.ehlo()
+            server.login(smtp_user, smtp_pass)
+            server.sendmail(smtp_user, [destino], msg.as_string())
+            app.logger.info(f"Correo enviado a {destino} por {modo}:{puerto} ({asunto})")
+            return None
+        except smtplib.SMTPAuthenticationError as e:
+            app.logger.error(
+                "Gmail rechazo las credenciales SMTP. Revisa que SMTP_USER sea la "
+                "cuenta completa y que SMTP_PASS sea una contrasena de APLICACION "
+                f"(16 caracteres) con verificacion en 2 pasos activa. Detalle: {e}"
+            )
+            return 'smtp_auth'
+        except Exception as e:
+            ultimo_error = e
+            app.logger.warning(f"Fallo envio por {modo}:{puerto} -> {e}")
+        finally:
+            if server is not None:
+                try:
+                    server.quit()
+                except Exception:
+                    pass
+
+    app.logger.error(f"No se pudo enviar el correo a {destino}. Ultimo error: {ultimo_error}")
+    return 'smtp_conexion'
+
+
+def _normalizar_correo(valor):
+    """Normaliza un correo: sin espacios y en minusculas.
+
+    Evita que 'Juan@Gmail.com ' y 'juan@gmail.com' se traten como distintos,
+    que es una de las causas de duplicados y de logins fallidos.
+    """
+    return (valor or '').strip().lower()
 
 
 class Producto(db.Model):
@@ -181,7 +222,7 @@ def inicio():
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
-        correo = request.form['correo']
+        correo = _normalizar_correo(request.form['correo'])
         clave  = request.form['clave']
         conn   = get_connection_auth()
         cursor = conn.cursor(dictionary=True)
@@ -189,7 +230,7 @@ def login():
             SELECT u.id_usuario, u.nombres, u.email, u.contrasena, r.nombre AS rol
             FROM usuario u
             INNER JOIN rol r ON u.id_rol = r.id_rol
-            WHERE u.email = %s
+            WHERE LOWER(TRIM(u.email)) = %s
         """, (correo,))
         usuario = cursor.fetchone()
         conn.close()
@@ -217,12 +258,14 @@ def login():
 @app.route('/login_cliente', methods=['GET', 'POST'])
 def login_cliente():
     if request.method == 'POST':
-        correo     = request.form['correo']
+        correo     = _normalizar_correo(request.form['correo'])
         contrasena = request.form['contrasena']
         conn       = get_connection_auth()
         cursor     = conn.cursor(dictionary=True)
         # Busca el cliente por email — la columna nombre puede variar
-        cursor.execute("SELECT * FROM cliente WHERE email = %s", (correo,))
+        cursor.execute(
+            "SELECT * FROM cliente WHERE LOWER(TRIM(email)) = %s ORDER BY id_cliente LIMIT 1",
+            (correo,))
         cliente = cursor.fetchone()
         conn.close()
 
@@ -826,7 +869,7 @@ def clientes():
 def nuevo_cliente():
     if request.method == 'POST':
         nombre    = request.form['nombre']
-        email     = request.form['email']
+        email     = _normalizar_correo(request.form['email'])
         telefono  = request.form.get('telefono', '')
         direccion = request.form.get('direccion', '')
         contrasena = request.form.get('contrasena', '123456')
@@ -836,7 +879,11 @@ def nuevo_cliente():
         cursor = conn.cursor()
         try:
             cursor.execute(
-                "INSERT INTO cliente (nombre, email, telefono, direccion, contrasena) VALUES (%s,%s,%s,%s,%s)",
+                # activo se fija de forma explicita: si se deja al DEFAULT de la
+                # columna (TRUE) el cliente queda "verificado" sin haberlo hecho y
+                # despues no puede registrarse por la web ("ya esta registrado").
+                "INSERT INTO cliente (nombre, email, telefono, direccion, contrasena, activo) "
+                "VALUES (%s,%s,%s,%s,%s,TRUE)",
                 (nombre, email, telefono, direccion, hash_pw)
             )
             conn.commit()
@@ -858,7 +905,7 @@ def editar_cliente(id):
     cursor = conn.cursor(dictionary=True)
     if request.method == 'POST':
         nombre    = request.form['nombre']
-        email     = request.form['email']
+        email     = _normalizar_correo(request.form['email'])
         telefono  = request.form.get('telefono', '')
         direccion = request.form.get('direccion', '')
         try:
@@ -1837,51 +1884,82 @@ def _correo_html_codigo(nombre, codigo, motivo):
 
 @app.route('/registro_cliente', methods=['POST'])
 def registro_cliente():
-    """Registro de nuevo cliente: crea la cuenta con activo=FALSE y guarda el
-    hash del código OTP en verificacion_cuenta (BD Auth)."""
+    """Registro de nuevo cliente.
+
+    Crea (o reutiliza) la cuenta con activo=FALSE y guarda SOLO el hash del
+    codigo OTP en verificacion_cuenta (BD Auth). El codigo viaja unicamente
+    por correo: nunca se muestra en pantalla.
+    """
     import random
 
     nombre     = request.form.get('nombre', '').strip()
     apellido   = request.form.get('apellido', '').strip()
-    correo     = request.form.get('correo', '').strip()
+    correo     = _normalizar_correo(request.form.get('correo'))
     telefono   = request.form.get('telefono', '').strip()
     contrasena = request.form.get('contrasena', '')
     confirmar  = request.form.get('confirmar', '')
 
     if not nombre or not correo or not contrasena:
         return render_template('login_cliente.html',
-                               error='Nombre, correo y contraseña son obligatorios.',
+                               error='Nombre, correo y contrasena son obligatorios.',
                                registro_activo=True)
     if contrasena != confirmar:
         return render_template('login_cliente.html',
-                               error='Las contraseñas no coinciden.',
+                               error='Las contrasenas no coinciden.',
+                               registro_activo=True)
+    if len(contrasena) < 6:
+        return render_template('login_cliente.html',
+                               error='La contrasena debe tener al menos 6 caracteres.',
                                registro_activo=True)
 
-    codigo      = str(random.randint(100000, 999999))
+    codigo      = f"{random.randint(0, 999999):06d}"
     hash_pw     = bcrypt.generate_password_hash(contrasena).decode('utf-8')
     codigo_hash = bcrypt.generate_password_hash(codigo).decode('utf-8')
 
     conn   = get_connection_auth()
     cursor = conn.cursor(dictionary=True)
     try:
-        # ¿Ya existe el correo?
-        cursor.execute("SELECT id_cliente, activo FROM cliente WHERE email = %s", (correo,))
+        # Comparacion insensible a mayusculas y espacios: asi no se crean
+        # duplicados ni se bloquea por diferencias de formato.
+        cursor.execute("""
+            SELECT id_cliente, activo, contrasena
+            FROM cliente
+            WHERE LOWER(TRIM(email)) = %s
+            ORDER BY id_cliente
+            LIMIT 1
+        """, (correo,))
         existente = cursor.fetchone()
-        if existente and existente['activo']:
-            return render_template('login_cliente.html',
-                                   error='Este correo ya está registrado. Inicia sesión.',
-                                   registro_activo=True)
 
         if existente:
-            # Registro pendiente de verificación: actualizar datos del formulario
+            tiene_clave = bool((existente.get('contrasena') or '').strip())
+            cuenta_usable = bool(existente.get('activo')) and tiene_clave
+
+            if cuenta_usable:
+                # Bloqueo legitimo: ya hay una cuenta verificada y con clave.
+                # Se registra el id en el log para poder ubicarla en la BD.
+                app.logger.warning(
+                    "Registro bloqueado: el correo %s ya existe como id_cliente=%s "
+                    "en la BD Auth (proyecto DATABASE_URI_AUTH).",
+                    correo, existente['id_cliente']
+                )
+                return render_template(
+                    'login_cliente.html',
+                    error=('Este correo ya tiene una cuenta activa. Inicia sesion o usa '
+                           '"Olvide mi contrasena".'),
+                    registro_activo=True)
+
+            # Cuenta pendiente de verificar, o creada por el area administrativa
+            # sin contrasena: se reutiliza la fila y se vuelve a verificar.
             id_cliente = existente['id_cliente']
             cursor.execute("""
-                UPDATE cliente SET nombre=%s, apellido=%s, telefono=%s, contrasena=%s
-                WHERE id_cliente=%s
-            """, (nombre, apellido or None, telefono or None, hash_pw, id_cliente))
+                UPDATE cliente
+                   SET nombre = %s, apellido = %s, telefono = %s,
+                       contrasena = %s, email = %s, activo = FALSE
+                 WHERE id_cliente = %s
+            """, (nombre, apellido or None, telefono or None, hash_pw, correo, id_cliente))
         else:
-            # id_tipo_documento=1 (DNI) y nro_documento vacío ('') por defecto;
-            # el formulario web no pide documento todavía
+            # id_tipo_documento=1 (DNI) y nro_documento vacio por defecto:
+            # el formulario web aun no pide documento.
             cursor.execute("""
                 INSERT INTO cliente (nombre, apellido, email, telefono, contrasena,
                                      id_tipo_documento, nro_documento, activo)
@@ -1890,7 +1968,7 @@ def registro_cliente():
             """, (nombre, apellido or None, correo, telefono or None, hash_pw))
             id_cliente = cursor.fetchone()['id_cliente']
 
-        # Invalidar códigos anteriores de este cliente y guardar el nuevo (solo el hash)
+        # Invalidar codigos anteriores y guardar el nuevo (solo el hash)
         cursor.execute("""
             UPDATE verificacion_cuenta SET usado = TRUE
             WHERE id_cliente = %s AND usado = FALSE
@@ -1902,37 +1980,41 @@ def registro_cliente():
         conn.commit()
     except Exception as e:
         conn.rollback()
-        app.logger.error(f"Error en registro_cliente: {e}")
+        app.logger.exception(f"Error en registro_cliente ({correo}): {e}")
         return render_template('login_cliente.html',
                                error='No se pudo iniciar el registro. Intenta de nuevo.',
                                registro_activo=True)
     finally:
         conn.close()
 
-    # En sesión solo queda el correo (el código vive en la BD Auth)
+    # En sesion solo queda el correo (el codigo vive hasheado en la BD Auth)
     session['reg_correo'] = correo
 
     resultado = enviar_correo(
         correo,
-        f'Tu código de verificación CLEOFERR: {codigo}',
-        _correo_html_codigo(nombre, codigo, 'Tu código de verificación para crear tu cuenta es:'),
-        f"Hola {nombre},\n\nTu código de verificación es: {codigo}\n\nVálido por 10 minutos."
+        'Tu codigo de verificacion CLEOFERR',
+        _correo_html_codigo(nombre, codigo, 'Tu codigo de verificacion para crear tu cuenta es:'),
+        f"Hola {nombre},\n\nTu codigo de verificacion es: {codigo}\n\nValido por 10 minutos."
     )
 
     if resultado == 'smtp_no_configurado':
-        # Modo desarrollo: mostrar el código en pantalla
         return render_template('login_cliente.html',
-                               verificar_activo=True,
-                               correo_verificar=correo,
-                               codigo_visible=codigo,
-                               aviso_smtp=True)
+                               error=('El envio de correos no esta configurado en el servidor. '
+                                      'Avisa al administrador (falta SMTP_USER/SMTP_PASS).'),
+                               registro_activo=True)
     if resultado == 'smtp_auth':
         return render_template('login_cliente.html',
-                               error='Error de autenticación con el correo. Contacta al administrador.',
+                               error=('Error de autenticacion del correo del sistema. '
+                                      'Contacta al administrador.'),
+                               registro_activo=True)
+    if resultado == 'smtp_conexion':
+        return render_template('login_cliente.html',
+                               error=('No se pudo conectar con el servidor de correo. '
+                                      'Revisa tu conexion e intenta de nuevo.'),
                                registro_activo=True)
     if resultado:
         return render_template('login_cliente.html',
-                               error='No se pudo enviar el correo de verificación. Intenta de nuevo.',
+                               error='No se pudo enviar el correo de verificacion. Intenta de nuevo.',
                                registro_activo=True)
 
     return render_template('login_cliente.html',
@@ -1942,20 +2024,27 @@ def registro_cliente():
 
 @app.route('/verificar_registro', methods=['POST'])
 def verificar_registro():
-    """Verifica el código OTP contra verificacion_cuenta y activa la cuenta."""
+    """Verifica el codigo OTP contra verificacion_cuenta y activa la cuenta."""
+    from datetime import datetime, timezone
+
     codigo_ingresado = request.form.get('codigo', '').strip()
-    correo = session.get('reg_correo')
+    # El correo viene de la sesion; el hidden del formulario es solo respaldo
+    # por si la cookie de sesion se perdio.
+    correo = session.get('reg_correo') or _normalizar_correo(request.form.get('correo'))
 
     if not correo:
         return render_template('login_cliente.html',
-                               error='Sesión expirada. Por favor regístrate de nuevo.',
+                               error='Sesion expirada. Por favor registrate de nuevo.',
                                registro_activo=True)
 
     conn   = get_connection_auth()
     cursor = conn.cursor(dictionary=True)
     try:
-        # Cliente pendiente de verificación
-        cursor.execute("SELECT id_cliente FROM cliente WHERE email = %s", (correo,))
+        cursor.execute("""
+            SELECT id_cliente FROM cliente
+            WHERE LOWER(TRIM(email)) = %s
+            ORDER BY id_cliente LIMIT 1
+        """, (correo,))
         cliente = cursor.fetchone()
         if not cliente:
             return render_template('login_cliente.html',
@@ -1963,9 +2052,9 @@ def verificar_registro():
                                    registro_activo=True)
         id_cliente = cliente['id_cliente']
 
-        # Último código vigente no usado para ese cliente
         cursor.execute("""
-            SELECT id_verificacion, codigo_hash, expira_en
+            SELECT id_verificacion, codigo_hash, expira_en,
+                   COALESCE(intentos_fallidos, 0) AS intentos_fallidos
             FROM verificacion_cuenta
             WHERE id_cliente = %s AND usado = FALSE
             ORDER BY creado_en DESC LIMIT 1
@@ -1974,16 +2063,27 @@ def verificar_registro():
 
         if not verif:
             return render_template('login_cliente.html',
-                                   error='No hay un código activo. Solicita uno nuevo desde el registro.',
-                                   verificar_activo=True,
-                                   correo_verificar=correo)
+                                   error='No hay un codigo activo. Solicita uno nuevo desde el registro.',
+                                   registro_activo=True)
 
-        from datetime import datetime, timezone
-        if verif['expira_en'] < datetime.now(timezone.utc):
+        # La columna puede ser TIMESTAMP sin zona horaria; comparar un datetime
+        # naive con uno aware lanza TypeError. Se normalizan ambos a UTC.
+        expira = verif['expira_en']
+        if expira.tzinfo is None:
+            expira = expira.replace(tzinfo=timezone.utc)
+        if expira < datetime.now(timezone.utc):
             return render_template('login_cliente.html',
-                                   error='El código expiró. Regístrate de nuevo para recibir uno nuevo.',
-                                   verificar_activo=True,
-                                   correo_verificar=correo)
+                                   error='El codigo expiro. Registrate de nuevo para recibir uno nuevo.',
+                                   registro_activo=True)
+
+        # Bloqueo por fuerza bruta: 5 intentos como maximo por codigo.
+        if verif['intentos_fallidos'] >= 5:
+            cursor.execute("UPDATE verificacion_cuenta SET usado = TRUE WHERE id_verificacion = %s",
+                           (verif['id_verificacion'],))
+            conn.commit()
+            return render_template('login_cliente.html',
+                                   error='Demasiados intentos fallidos. Solicita un codigo nuevo.',
+                                   registro_activo=True)
 
         try:
             coincide = bcrypt.check_password_hash(verif['codigo_hash'], codigo_ingresado)
@@ -1991,27 +2091,29 @@ def verificar_registro():
             coincide = False
 
         if not coincide:
-            cursor.execute("UPDATE verificacion_cuenta SET intentos_fallidos = intentos_fallidos + 1 WHERE id_verificacion = %s",
-                           (verif['id_verificacion'],))
+            cursor.execute("""
+                UPDATE verificacion_cuenta
+                   SET intentos_fallidos = COALESCE(intentos_fallidos, 0) + 1
+                 WHERE id_verificacion = %s
+            """, (verif['id_verificacion'],))
             conn.commit()
             return render_template('login_cliente.html',
-                                   error='Código incorrecto. Intenta de nuevo.',
+                                   error='Codigo incorrecto. Intenta de nuevo.',
                                    verificar_activo=True,
                                    correo_verificar=correo)
 
-        # Código correcto: marcarlo usado y activar la cuenta
         cursor.execute("UPDATE verificacion_cuenta SET usado = TRUE WHERE id_verificacion = %s",
                        (verif['id_verificacion'],))
         cursor.execute("UPDATE cliente SET activo = TRUE WHERE id_cliente = %s", (id_cliente,))
         conn.commit()
         session.pop('reg_correo', None)
         return render_template('login_cliente.html',
-                               success='¡Cuenta creada y verificada! Ya puedes iniciar sesión.')
+                               success='Cuenta creada y verificada. Ya puedes iniciar sesion.')
     except Exception as e:
         conn.rollback()
-        app.logger.error(f"Error en verificar_registro: {e}")
+        app.logger.exception(f"Error en verificar_registro ({correo}): {e}")
         return render_template('login_cliente.html',
-                               error='Error al verificar el código. Intenta de nuevo.',
+                               error='Error al verificar el codigo. Intenta de nuevo.',
                                registro_activo=True)
     finally:
         conn.close()
@@ -2021,11 +2123,11 @@ def verificar_registro():
 def _buscar_cuenta_por_correo(cursor, correo):
     """Busca el correo en usuario y en cliente (BD Auth).
     Devuelve (tipo, dict) donde tipo es 'usuario' o 'cliente', o (None, None)."""
-    cursor.execute("SELECT id_usuario, nombres FROM usuario WHERE email = %s", (correo,))
+    cursor.execute("SELECT id_usuario, nombres FROM usuario WHERE LOWER(TRIM(email)) = %s", (correo,))
     u = cursor.fetchone()
     if u:
         return 'usuario', u
-    cursor.execute("SELECT id_cliente, nombre FROM cliente WHERE email = %s", (correo,))
+    cursor.execute("SELECT id_cliente, nombre FROM cliente WHERE LOWER(TRIM(email)) = %s", (correo,))
     c = cursor.fetchone()
     if c:
         return 'cliente', c
@@ -2040,7 +2142,7 @@ def recuperar_contrasena():
     if request.method == 'GET':
         return render_template('recuperar_contrasena.html')
 
-    correo = request.form.get('correo', '').strip()
+    correo = _normalizar_correo(request.form.get('correo'))
     if not correo:
         return render_template('recuperar_contrasena.html',
                                error='Ingresa tu correo electrónico.')
@@ -2090,11 +2192,14 @@ def recuperar_contrasena():
     )
     if resultado == 'smtp_no_configurado':
         return render_template('recuperar_contrasena.html',
-                               verificar_activo=True, correo_verificar=correo,
-                               codigo_visible=codigo, aviso_smtp=True)
+                               error=('El envío de correos no está configurado en el servidor. '
+                                      'Avisa al administrador (falta SMTP_USER/SMTP_PASS).'))
     if resultado == 'smtp_auth':
         return render_template('recuperar_contrasena.html',
                                error='Error de autenticación con el correo. Contacta al administrador.')
+    if resultado == 'smtp_conexion':
+        return render_template('recuperar_contrasena.html',
+                               error='No se pudo conectar con el servidor de correo. Intenta de nuevo.')
     if resultado:
         return render_template('recuperar_contrasena.html',
                                error='No se pudo enviar el correo. Intenta de nuevo.')
@@ -2106,7 +2211,7 @@ def recuperar_contrasena():
 @app.route('/restablecer_contrasena', methods=['POST'])
 def restablecer_contrasena():
     """Paso 2: valida el OTP y cambia la contraseña (usuario o cliente)."""
-    correo     = request.form.get('correo', '').strip()
+    correo     = _normalizar_correo(request.form.get('correo'))
     codigo     = request.form.get('codigo', '').strip()
     nueva      = request.form.get('nueva', '')
     confirmar  = request.form.get('confirmar', '')
